@@ -216,7 +216,7 @@ export const routes = {
     if (screen.blocked) {
       const primary = screen.blocks[0];
       if (primary.code === 'minor') {
-        db.updateFan(fan.id, { blocked: 1, block_reason: primary.label });
+        db.updateFan(userId, fan.id, { blocked: 1, block_reason: primary.label });
       }
       return ok({
         blocked: true,
@@ -410,7 +410,7 @@ export const routes = {
     const history = db.listManagerMessages(userId);
     const snapshot = buildSnapshot(userId);
 
-    db.addManagerMessage('user', question);
+    db.addManagerMessage(userId, 'user', question);
 
     const payload = buildManagerPayload({ config, snapshot, history, question });
 
@@ -424,7 +424,7 @@ export const routes = {
       throw err;
     }
 
-    const saved = db.addManagerMessage('assistant', text);
+    const saved = db.addManagerMessage(userId, 'assistant', text);
     return ok({ reply: saved, snapshot });
   },
 
