@@ -1034,7 +1034,15 @@ async function viewManager() {
           Screenshot your Fansly stats or earnings page and import it. Do it every week and
           the manager can talk about direction, not just today's figure.
         </div>`}
-      <button class="sm" id="scanStats" style="width:100%">📷 Import my Fansly stats</button>
+      <div class="row" style="gap:8px;margin-bottom:9px">
+        <input id="myHandle" class="grow" placeholder="fansly.com/her-username" value="${esc(config.fanslyHandle ? '@' + config.fanslyHandle : '')}" />
+        <button class="primary" id="fetchMine">↻</button>
+      </div>
+      <div class="tiny" style="margin-bottom:11px">
+        Paste her profile link once, then tap ↻ to pull followers, subscribers, likes,
+        photos and videos straight from her public page.
+      </div>
+      <button class="sm ghost" id="scanStats" style="width:100%">📷 Or import from a screenshot</button>
       <div id="scanResult"></div>
     </div>
 
@@ -1057,7 +1065,11 @@ async function viewManager() {
           </div>
           <button class="sm danger" data-delcomp="${c.id}">✕</button>
         </div>`).join('')}
-      <button class="sm" id="scanProfile" style="width:100%;margin-top:11px">📷 Import a competitor profile</button>
+      <div class="row" style="gap:8px;margin:12px 0 8px">
+        <input id="compLink" class="grow" placeholder="Paste a competitor's profile link" />
+        <button class="primary" id="fetchComp">+</button>
+      </div>
+      <button class="sm ghost" id="scanProfile" style="width:100%">📷 Or import from a screenshot</button>
       <div id="profileResult"></div>
     </div>
 
@@ -1109,6 +1121,34 @@ async function viewManager() {
       </div>
     </div>
   `;
+
+  /* -- One-tap refresh straight from her public Fansly page -- */
+  const lookup = async (btn, input, save, notes) => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    try {
+      const res = await api('/fansly/lookup', { method: 'POST', body: { input, save, notes } });
+      toast(`✅ ${res.display_name || res.handle} — ${res.metrics.followers.toLocaleString()} followers`);
+      viewManager();
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
+
+  document.getElementById('fetchMine').onclick = (e) => {
+    const v = document.getElementById('myHandle').value.trim();
+    if (!v) return toast('Paste her profile link first');
+    lookup(e.currentTarget, v, 'me');
+  };
+
+  document.getElementById('fetchComp').onclick = (e) => {
+    const v = document.getElementById('compLink').value.trim();
+    if (!v) return toast('Paste a profile link first');
+    lookup(e.currentTarget, v, 'competitor');
+  };
 
   /* -- Account scan: read the stats screenshots, then let her confirm -- */
   document.getElementById('scanStats').onclick = async (e) => {

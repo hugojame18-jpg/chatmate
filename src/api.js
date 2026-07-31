@@ -1,5 +1,6 @@
-// Routes de l'API. Aucune connexion sortante vers Fansly : le seul appel reseau
-// possible est celui vers le moteur IA choisi dans les reglages.
+// API routes. The only outbound calls are to the chosen AI provider, and to
+// Fansly's PUBLIC profile endpoint for read-only stats. Nothing is ever written
+// to Fansly and no account of hers is ever used.
 
 import * as db from './db.js';
 import {
@@ -11,6 +12,7 @@ import {
   extractProfile, extractStats, generateSuggestions, generateText, transcribeScreenshots, LlmError
 } from './llm.js';
 import { buildManagerPayload, buildStrategyPayload, buildSnapshot } from './manager.js';
+import { fetchAccount, FanslyError } from './fansly.js';
 import { screenIncoming, screenOutgoing } from './safety.js';
 
 const ok = (data) => ({ status: 200, body: data });
@@ -463,6 +465,41 @@ export const routes = {
     if (!db.listPlatformStats(userId, 999).some((r) => String(r.id) === String(params.id))) return bad('Not found.', 404);
     db.deletePlatformStats(userId, params.id);
     return ok({ deleted: true });
+  },
+
+  /* ------------------------- Fansly public lookup ------------------------ */
+
+  // Reads a PUBLIC profile. No login, no write, nothing touched on the platform.
+  // `save` decides whether the numbers are stored as one of her own snapshots.
+  'POST /api/fansly/lookup': async ({ body, userId }) => {
+    const input = String(body?.input || '').trim();
+    if (!input) return bad('Paste a Fansly profile link or username.');
+
+    let account;
+    try {
+      account = await fetchAccount(input);
+    } catch (err) {
+      if (err instanceof FanslyError) return { status: 502, body: { error: err.message, hint: err.hint } };
+      throw err;
+    }
+
+    if (body?.save === 'me') {
+      db.saveConfig(userId, { fanslyHandle: account.handle });
+      db.addPlatformStats(userId, `@${account.handle}`, account.metrics);
+    } else if (body?.save === 'competitor') {
+      db.addCompetitor(userId, {
+        handle: `@${account.handle}`,
+        display_name: account.display_name,
+        followers: account.metrics.followers,
+        subscribers: account.metrics.subscribers,
+        price: account.price_low,
+        bio: account.bio,
+        themes: '',
+        notes: String(body?.notes || '')
+      });
+    }
+
+    return ok(account);
   },
 
   /* ----------------------------- Competitors ----------------------------- */

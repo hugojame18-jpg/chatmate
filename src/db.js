@@ -261,6 +261,8 @@ export const DEFAULT_CONFIG = {
   // OpenRouter runs a web search plugin when ":online" is appended to a model id.
   // Off by default because it costs noticeably more per question.
   managerWebSearch: false,
+  // Her own Fansly handle, so the stats can be refreshed in one tap.
+  fanslyHandle: '',
   llmApiKey: ''
 };
 
