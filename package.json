@@ -1,0 +1,14 @@
+{
+  "name": "chatmate",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Assistant de reponses prive. Aucune connexion a Fansly : copier-coller uniquement.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=22.5.0"
+  }
+}

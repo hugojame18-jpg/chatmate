@@ -1,0 +1,12 @@
+# The local database must never be baked into the image: the deployed app gets a
+# fresh one on its own volume, and shipping this would leak her real data.
+data/
+*.db
+*.db-wal
+*.db-shm
+
+node_modules/
+.git/
+.env
+*.log
+Lancer chatmate.bat

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#12101a" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>chatmate</title>
+    <link rel="stylesheet" href="/style.css" />
+    <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='26' font-size='26'>💬</text></svg>" />
+  </head>
+  <body>
+    <header class="topbar">
+      <button class="back" id="back" hidden aria-label="Back">‹</button>
+      <h1 id="title">chatmate</h1>
+      <span class="pill" id="topPill"></span>
+    </header>
+
+    <main id="view"><div class="loading">Loading…</div></main>
+
+    <nav class="tabbar">
+      <a href="#/fans" data-tab="fans"><span>👥</span>Fans</a>
+      <a href="#/relances" data-tab="relances"><span>🔔</span>Follow-ups</a>
+      <a href="#/manager" data-tab="manager"><span>📈</span>Manager</a>
+      <a href="#/media" data-tab="media"><span>🎬</span>Content</a>
+      <a href="#/reglages" data-tab="reglages"><span>⚙️</span>Settings</a>
+    </nav>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

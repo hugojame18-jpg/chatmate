@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#14101f" />
+    <meta name="robots" content="noindex, nofollow" />
+    <title>chatmate</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main style="display:grid;place-items:center;min-height:100vh;padding:24px">
+      <div style="width:100%;max-width:380px">
+        <div class="hero" style="text-align:center">
+          <div class="headline"><em>chatmate</em></div>
+          <div class="greet" style="margin-top:6px" id="sub">Sign in to your account</div>
+        </div>
+
+        <div class="card stack">
+          <div>
+            <label for="email">Email</label>
+            <input id="email" type="email" autocomplete="email" autocapitalize="off" spellcheck="false" />
+          </div>
+          <div>
+            <label for="pw">Password</label>
+            <input id="pw" type="password" autocomplete="current-password" />
+          </div>
+          <div id="confirmWrap" hidden>
+            <label for="pw2">Confirm password</label>
+            <input id="pw2" type="password" autocomplete="new-password" />
+          </div>
+
+          <button class="primary big" id="go">Sign in</button>
+          <div id="err" class="alert block" hidden></div>
+        </div>
+
+        <button class="ghost sm" id="toggle" style="width:100%">
+          No account yet? Create one
+        </button>
+
+        <div class="tiny" style="text-align:center;margin-top:18px">
+          Your data stays in your own account. Nothing is shared between accounts.
+        </div>
+      </div>
+    </main>
+
+    <script>
+      const $ = (id) => document.getElementById(id);
+      let mode = 'login';
+
+      function setMode(next) {
+        mode = next;
+        const signup = mode === 'signup';
+        $('sub').textContent = signup ? 'Create your account' : 'Sign in to your account';
+        $('go').textContent = signup ? 'Create account' : 'Sign in';
+        $('confirmWrap').hidden = !signup;
+        $('pw').autocomplete = signup ? 'new-password' : 'current-password';
+        $('toggle').textContent = signup
+          ? 'Already have an account? Sign in'
+          : 'No account yet? Create one';
+        $('err').hidden = true;
+      }
+
+      function fail(msg) {
+        $('err').textContent = msg;
+        $('err').hidden = false;
+      }
+
+      async function submit() {
+        const email = $('email').value.trim();
+        const password = $('pw').value;
+
+        if (!email || !password) return fail('Email and password are required.');
+        if (mode === 'signup') {
+          if (password.length < 8) return fail('Password must be at least 8 characters.');
+          if (password !== $('pw2').value) return fail('The two passwords do not match.');
+        }
+
+        $('err').hidden = true;
+        $('go').disabled = true;
+        $('go').textContent = mode === 'signup' ? 'Creating…' : 'Checking…';
+
+        try {
+          const res = await fetch(mode === 'signup' ? '/api/signup' : '/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, password })
+          });
+          if (res.ok) { location.href = '/'; return; }
+          const data = await res.json().catch(() => ({}));
+          fail(data.error || 'Something went wrong.');
+        } catch {
+          fail('Could not reach the server.');
+        }
+
+        $('go').disabled = false;
+        setMode(mode);
+        $('pw').value = '';
+        if ($('pw2')) $('pw2').value = '';
+      }
+
+      $('go').onclick = submit;
+      $('toggle').onclick = () => setMode(mode === 'login' ? 'signup' : 'login');
+      for (const id of ['email', 'pw', 'pw2']) {
+        $(id).onkeydown = (e) => { if (e.key === 'Enter') submit(); };
+      }
+
+      // First run on a fresh database goes straight to account creation.
+      fetch('/api/session')
+        .then((r) => r.json())
+        .then((s) => { if (!s.has_accounts) setMode('signup'); })
+        .catch(() => {});
+
+      $('email').focus();
+    </script>
+  </body>
+</html>
