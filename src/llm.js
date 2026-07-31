@@ -10,6 +10,9 @@
 // take well over a minute, so the ceiling is set for the slowest call.
 const TIMEOUT_MS = 180000;
 
+// How many times a cut-off answer may be resumed before we hand back what we have.
+const MAX_CONTINUATIONS = 3;
+
 class LlmError extends Error {
   constructor(message, { status = 0, hint = '' } = {}) {
     super(message);
@@ -163,9 +166,22 @@ async function rawCompletion({ config, messages, temperature = 0.9, maxTokens = 
       detail = JSON.parse(bodyText)?.error?.message || detail;
     } catch { /* on garde le texte brut */ }
 
+    // OpenRouter caps how many tokens a request may reserve against the remaining
+    // balance. Low credit therefore shows up as a truncated answer, not as an
+    // obvious "out of money" error, so it is worth naming explicitly.
+    const afford = /can only afford (\d+)/i.exec(detail);
+    if (afford) {
+      const err = new LlmError(
+        `Not enough OpenRouter credit: this answer can only be ${afford[1]} tokens long.`,
+        'Top up at openrouter.ai/settings/credits. Answers stay short and get cut off until you do.'
+      );
+      err.affordable = Number(afford[1]);
+      throw err;
+    }
+
     const hints = {
       401: 'API key is invalid or expired.',
-      402: 'Not enough credit with the provider.',
+      402: 'Out of OpenRouter credit. This is also what makes answers come back cut off. Top up at openrouter.ai/settings/credits.',
       403: 'This model refuses this kind of content. Try a less filtered open-weight model.',
       404: 'Model name not found. Check the exact identifier.',
       429: 'Too many requests, wait a few seconds.'
@@ -180,15 +196,18 @@ async function rawCompletion({ config, messages, temperature = 0.9, maxTokens = 
     throw new LlmError('Unreadable response from the provider.');
   }
 
-  const raw = payload?.choices?.[0]?.message?.content;
+  const choice = payload?.choices?.[0];
+  const raw = choice?.message?.content;
   if (!raw) throw new LlmError('The provider returned no content.');
 
-  return raw;
+  // "length" means the model was cut off mid-sentence by max_tokens, not that it
+  // finished. Callers that produce long text use this to ask for the rest.
+  return { text: raw, truncated: choice?.finish_reason === 'length' };
 }
 
 async function chatCompletion({ config, messages }) {
-  const raw = await rawCompletion({ config, messages });
-  return normalise(extractJson(raw), raw);
+  const { text } = await rawCompletion({ config, messages, maxTokens: 1400 });
+  return normalise(extractJson(text), text);
 }
 
 /**
@@ -224,12 +243,13 @@ export async function transcribeScreenshots({ config, images }) {
   const content = [{ type: 'text', text: instructions }];
   for (const url of images) content.push({ type: 'image_url', image_url: { url } });
 
-  return rawCompletion({
+  const { text } = await rawCompletion({
     config: visionConfig,
     messages: [{ role: 'user', content }],
     temperature: 0.1,
-    maxTokens: 2000
+    maxTokens: 3000
   });
+  return text;
 }
 
 /**
@@ -277,11 +297,11 @@ export async function extractStats({ config, images }) {
   const content = [{ type: 'text', text: instructions }];
   for (const url of images) content.push({ type: 'image_url', image_url: { url } });
 
-  const raw = await rawCompletion({
+  const { text: raw } = await rawCompletion({
     config: visionConfig,
     messages: [{ role: 'user', content }],
     temperature: 0.1,
-    maxTokens: 1200
+    maxTokens: 2000
   });
 
   const parsed = extractJson(raw);
@@ -369,7 +389,7 @@ export async function extractProfile({ config, images }) {
   const content = [{ type: 'text', text: instructions }];
   for (const url of images) content.push({ type: 'image_url', image_url: { url } });
 
-  const raw = await rawCompletion({
+  const { text: raw } = await rawCompletion({
     config: visionConfig,
     messages: [{ role: 'user', content }],
     temperature: 0.1,
@@ -388,7 +408,7 @@ export async function extractProfile({ config, images }) {
 /**
  * Plain-text generation, used by the manager chat (no JSON contract there).
  */
-export async function generateText({ config, messages, webSearch = false }) {
+export async function generateText({ config, messages, webSearch = false, maxTokens = 4000 }) {
   if (!config.llmProvider || config.llmProvider === 'mock') {
     return (
       '**Demo mode — no AI engine connected.**\n\n' +
@@ -404,14 +424,62 @@ export async function generateText({ config, messages, webSearch = false }) {
       ? `${base}:online`
       : undefined;
 
-  const raw = await rawCompletion({ config, messages, temperature: 0.7, maxTokens: 2600, modelOverride });
+  const call = (msgs, maxTokens) =>
+    rawCompletion({ config, messages: msgs, temperature: 0.7, maxTokens, modelOverride });
+
+  let first;
+  try {
+    first = await call(messages, maxTokens);
+  } catch (err) {
+    // Low balance: retry once with what the account can actually pay for, so she
+    // gets a shorter answer rather than an error screen.
+    if (err instanceof LlmError && err.affordable > 200) {
+      first = await call(messages, err.affordable - 50);
+      first.lowCredit = true;
+    } else {
+      throw err;
+    }
+  }
+
+  let { text, truncated } = first;
+
+  // A cut-off answer is worse than a short one: she reads a plan that stops
+  // mid-sentence and cannot tell what is missing. Ask for the rest and stitch it.
+  // No point asking for the rest when the balance is what capped it.
+  let rounds = 0;
+  while (truncated && !first.lowCredit && rounds < MAX_CONTINUATIONS) {
+    rounds += 1;
+    const next = await call([
+      ...messages,
+      { role: 'assistant', content: text },
+      {
+        role: 'user',
+        content:
+          'You were cut off. Continue from exactly where you stopped, mid-sentence if needed. ' +
+          'Do not repeat anything already written, do not reintroduce the topic, do not add a preamble.'
+      }
+    ], maxTokens);
+
+    // Join without a space when we resumed mid-word.
+    text += /\s$/.test(text) || /^\s/.test(next.text) ? next.text : ` ${next.text}`;
+    truncated = next.truncated;
+  }
 
   // Models like wrapping a long markdown answer in a fence, which would then be
   // rendered as one big code block.
-  return String(raw)
+  const clean = String(text)
     .replace(/^\s*```(?:markdown|md)?\s*\n/i, '')
     .replace(/\n```\s*$/, '')
     .trim();
+
+  if (first.lowCredit) {
+    return `${clean}\n\n---\n\n**⚠️ Cut short: your OpenRouter credit is nearly gone.** ` +
+      'Top up at openrouter.ai/settings/credits to get full answers again.';
+  }
+  if (truncated) {
+    return `${clean}\n\n---\n\n*(Answer stopped here after several continuations. Ask a narrower question for the rest.)*`;
+  }
+  return clean;
 }
 
 /**
