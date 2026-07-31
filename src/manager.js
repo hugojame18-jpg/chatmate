@@ -176,6 +176,16 @@ function snapshotToText(s) {
         return `- ${when}${snap.label ? ` (${snap.label})` : ''}: ${body}`;
       });
 
+      // Categorical insights from the most recent import.
+      const last = snaps[snaps.length - 1];
+      const bd = last.breakdowns || {};
+      const fmtRows = (rows, unit) => (rows || [])
+        .map((r) => `${r.label} ${r.value}${unit || r.unit || ''}`).join(', ');
+
+      if (bd.traffic_sources?.length) lines.push(`- Traffic sources: ${fmtRows(bd.traffic_sources, '%')}`);
+      if (bd.top_content?.length) lines.push(`- Best performing content: ${fmtRows(bd.top_content)}`);
+      if (bd.hashtags?.length) lines.push(`- Hashtags that work: ${fmtRows(bd.hashtags)}`);
+
       // Direction matters more than the latest figure, so spell out the deltas.
       if (snaps.length >= 2) {
         const first = snaps[0].metrics;

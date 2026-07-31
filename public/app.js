@@ -925,6 +925,15 @@ function platformTrend(snaps) {
   const keys = Object.keys(latest.metrics).slice(0, 10);
   if (!keys.length) return '<div class="tiny">Nothing readable in the last import.</div>';
 
+  // Durations are stored as seconds; "102" on screen reads as nothing useful.
+  const show = (key, v) => {
+    if (/(time|duration)/i.test(key) && v >= 60) {
+      return `${Math.floor(v / 60)}m ${String(Math.round(v % 60)).padStart(2, '0')}s`;
+    }
+    if (/(rate|percent|share)/i.test(key)) return `${v}%`;
+    return v.toLocaleString();
+  };
+
   const rows = keys.map((k) => {
     const now = latest.metrics[k];
     const was = first.metrics[k];
@@ -938,7 +947,7 @@ function platformTrend(snaps) {
       <div class="row between" style="padding:7px 0;border-bottom:1px solid var(--line)">
         <span class="tiny">${esc(k.replace(/_/g, ' '))}</span>
         <span class="row" style="gap:9px">
-          <b style="font-size:15px">${now.toLocaleString()}</b>${delta}
+          <b style="font-size:15px">${show(k, now)}</b>${delta}
         </span>
       </div>`;
   }).join('');
@@ -947,7 +956,33 @@ function platformTrend(snaps) {
     ? `${snaps.length} imports · since ${String(first.captured_at).slice(0, 10)}`
     : `1 import · ${String(latest.captured_at).slice(0, 10)}`;
 
-  return `<div class="tiny" style="margin-bottom:6px">${span}</div>${rows}`;
+  return `<div class="tiny" style="margin-bottom:6px">${span}</div>${rows}${breakdownBlocks(latest.breakdowns)}`;
+}
+
+/* Traffic sources, hashtags and best posts from the latest import. */
+function breakdownBlocks(breakdowns) {
+  if (!breakdowns) return '';
+
+  const block = (rows, title, asBar) => {
+    if (!Array.isArray(rows) || !rows.length) return '';
+    const max = Math.max(...rows.map((r) => r.value), 1);
+    return `
+      <div style="margin-top:16px">
+        <div class="tiny" style="font-weight:700;margin-bottom:8px">${title}</div>
+        ${rows.map((r) => `
+          <div class="meter">
+            <span class="k" style="width:104px">${esc(r.label)}</span>
+            <span class="track"><span class="fill" style="width:${Math.round((r.value / max) * 100)}%"></span></span>
+            <span class="v" style="width:66px">${asBar ? `${r.value}%` : `${r.value.toLocaleString()}${r.unit ? ` ${esc(r.unit)}` : ''}`}</span>
+          </div>`).join('')}
+      </div>`;
+  };
+
+  return [
+    block(breakdowns.traffic_sources, '📍 Where visits come from', true),
+    block(breakdowns.top_content, '🔥 Best performing content', false),
+    block(breakdowns.hashtags, '#️⃣ Hashtags that work', false)
+  ].join('');
 }
 
 async function viewManager() {
@@ -1176,7 +1211,10 @@ async function viewManager() {
         <button class="primary sm" id="saveScan" style="width:100%;margin-top:10px">Save this snapshot</button>`;
 
       document.getElementById('saveScan').onclick = async () => {
-        await api('/platform', { method: 'POST', body: { metrics: res.metrics, label: res.period } });
+        await api('/platform', {
+          method: 'POST',
+          body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period }
+        });
         toast('📊 Snapshot saved');
         viewManager();
       };

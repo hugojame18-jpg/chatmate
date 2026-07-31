@@ -458,7 +458,9 @@ export const routes = {
     if (!metrics || typeof metrics !== 'object' || !Object.keys(metrics).length) {
       return bad('Nothing to save.');
     }
-    return ok(db.addPlatformStats(userId, String(body?.label || '').slice(0, 60), metrics));
+    return ok(db.addPlatformStats(
+      userId, String(body?.label || '').slice(0, 60), metrics, body?.breakdowns || null
+    ));
   },
 
   'DELETE /api/platform/:id': ({ params, userId }) => {

@@ -251,15 +251,24 @@ export async function extractStats({ config, images }) {
     'These are screenshots of the statistics, earnings or insights pages of an adult',
     'content creator account (Fansly or similar).',
     '',
-    'Extract every metric you can actually read. Return ONLY valid JSON, no code fence:',
+    'Extract everything you can actually read. Return ONLY valid JSON, no code fence:',
     '{',
     '  "period": "what timeframe the screen covers, e.g. \\"last 30 days\\" or \\"March 2026\\", or \\"\\" if unclear",',
-    '  "metrics": { "snake_case_label": number, ... }',
+    '  "metrics": { "snake_case_label": number, ... },',
+    '  "breakdowns": {',
+    '    "traffic_sources": [{"name": "where the visit came from", "share": percentage as a number}],',
+    '    "top_content":     [{"title": "post or media label", "value": number, "unit": "views|likes|earnings|purchases"}],',
+    '    "hashtags":        [{"tag": "#thetag", "value": number, "unit": "views|posts|engagement"}]',
+    '  }',
     '}',
     '',
     'Rules:',
     '- Use the label shown on screen, lowercased with underscores: "total earnings" -> "total_earnings".',
     '- Numbers only: strip currency symbols, commas and percent signs. "1,234.50" -> 1234.5, "12%" -> 12.',
+    '- Watch time, average view duration and engagement rate go in "metrics" as numbers.',
+    '  Convert durations to seconds: "1m 30s" -> 90, "2:15" -> 135.',
+    '- Read values off charts and bars too, including the labels around a pie or donut.',
+    '- Any breakdown you cannot see must be an empty array. Never invent a source, a tag or a title.',
     '- Do not invent a metric you cannot see. Do not guess. Omit anything unreadable.',
     '- If several screenshots cover the same metric, keep the clearest value once.',
     '- Ignore navigation, buttons and decorative text.'
@@ -289,11 +298,36 @@ export async function extractStats({ config, images }) {
     if (Number.isFinite(n)) metrics[String(key).slice(0, 40)] = n;
   }
 
-  if (!Object.keys(metrics).length) {
-    throw new LlmError('No readable numbers in those screenshots.');
-  }
+  const b = parsed.breakdowns || {};
+  const list = (rows, shape) => (Array.isArray(rows) ? rows : [])
+    .map((r) => shape(r))
+    .filter((r) => r && r.label && Number.isFinite(r.value))
+    .slice(0, 15);
 
-  return { period: String(parsed.period || '').slice(0, 60), metrics };
+  const breakdowns = {
+    traffic_sources: list(b.traffic_sources, (r) => ({
+      label: String(r?.name || '').slice(0, 40),
+      value: Number(r?.share),
+      unit: '%'
+    })),
+    top_content: list(b.top_content, (r) => ({
+      label: String(r?.title || '').slice(0, 60),
+      value: Number(r?.value),
+      unit: String(r?.unit || '').slice(0, 12)
+    })),
+    hashtags: list(b.hashtags, (r) => ({
+      label: String(r?.tag || '').slice(0, 40),
+      value: Number(r?.value),
+      unit: String(r?.unit || '').slice(0, 12)
+    }))
+  };
+
+  const hasAnything = Object.keys(metrics).length ||
+    Object.values(breakdowns).some((v) => v.length);
+
+  if (!hasAnything) throw new LlmError('No readable numbers in those screenshots.');
+
+  return { period: String(parsed.period || '').slice(0, 60), metrics, breakdowns };
 }
 
 /**

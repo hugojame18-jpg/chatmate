@@ -154,7 +154,10 @@ for (const sql of [
   'ALTER TABLE manager_messages ADD COLUMN user_id INTEGER',
   'ALTER TABLE platform_stats ADD COLUMN user_id INTEGER',
   'ALTER TABLE competitors ADD COLUMN user_id INTEGER',
-  'ALTER TABLE strategies ADD COLUMN user_id INTEGER'
+  'ALTER TABLE strategies ADD COLUMN user_id INTEGER',
+  // Categorical insights: traffic sources, hashtags, best posts. Kept apart from
+  // `metrics` because these are lists and shares, not single numbers.
+  'ALTER TABLE platform_stats ADD COLUMN breakdowns TEXT'
 ]) {
   try { db.exec(sql); } catch { /* column already there */ }
 }
@@ -506,10 +509,16 @@ export function offerStats(userId) {
 
 /* --------------------------- Platform snapshots ---------------------------- */
 
-export function addPlatformStats(userId, label, metrics) {
+export function addPlatformStats(userId, label, metrics, breakdowns = null) {
   const info = db.prepare(
-    'INSERT INTO platform_stats(user_id, label, metrics, captured_at) VALUES(?, ?, ?, ?)'
-  ).run(userId, label || '', JSON.stringify(metrics || {}), nowISO());
+    'INSERT INTO platform_stats(user_id, label, metrics, breakdowns, captured_at) VALUES(?, ?, ?, ?, ?)'
+  ).run(
+    userId,
+    label || '',
+    JSON.stringify(metrics || {}),
+    breakdowns ? JSON.stringify(breakdowns) : null,
+    nowISO()
+  );
   return db.prepare('SELECT * FROM platform_stats WHERE id = ?').get(Number(info.lastInsertRowid));
 }
 
@@ -517,8 +526,10 @@ export function listPlatformStats(userId, limit = 12) {
   return db.prepare('SELECT * FROM platform_stats WHERE user_id = ? ORDER BY id DESC LIMIT ?').all(userId, limit)
     .map((r) => {
       let metrics = {};
+      let breakdowns = {};
       try { metrics = JSON.parse(r.metrics); } catch { /* keep empty */ }
-      return { ...r, metrics };
+      try { if (r.breakdowns) breakdowns = JSON.parse(r.breakdowns); } catch { /* keep empty */ }
+      return { ...r, metrics, breakdowns };
     })
     .reverse();
 }
