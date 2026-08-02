@@ -1837,7 +1837,27 @@ async function router() {
     if (hash.startsWith('#/reglages')) return await viewReglages();
     return await viewFans();
   } catch (err) {
-    view.innerHTML = `<div class="alert block"><strong>Error</strong>${esc(err.message)}</div>`;
+    /* "Failed to fetch" means the request never reached anyone: she is offline, or
+       the server was restarting (a deploy takes the container down for a few
+       seconds). Neither is her fault and both fix themselves, so say so and give
+       her the button instead of a dead end. */
+    const offline = !navigator.onLine;
+    const unreachable = offline || /failed to fetch|networkerror|load failed/i.test(err.message);
+
+    view.innerHTML = `
+      <div class="alert block">
+        <strong>${offline ? 'You are offline' : unreachable ? 'Could not reach the app' : 'Something went wrong'}</strong>
+        ${unreachable
+          ? 'Nothing was lost. Check your connection, or wait a few seconds if the app was just updated.'
+          : esc(err.message)}
+      </div>
+      <button class="primary" id="retryView" style="width:100%">↻ Try again</button>`;
+
+    document.getElementById('retryView').onclick = (e) => {
+      e.currentTarget.disabled = true;
+      e.currentTarget.textContent = '⏳ Retrying…';
+      router();
+    };
   }
 }
 
