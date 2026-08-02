@@ -136,6 +136,61 @@ function pickScreenshots() {
   });
 }
 
+/* A HAR is a recording her browser already made of her own Insights pages, so
+   importing one sends nothing to Fansly. It is also huge (often 100 MB+) and holds
+   her live session token, so it is filtered and scrubbed HERE, on her own device.
+   Only the small cleaned result is uploaded — and the server scrubs it again. */
+function pickHar() {
+  const isFanslyApi = (url) => {
+    try {
+      const u = new URL(url);
+      return /(^|\.)fansly\.com$/i.test(u.hostname) && /\/api\//i.test(u.pathname);
+    } catch { return false; }
+  };
+
+  const scrub = (text) => String(text)
+    .replace(/"(\w*(?:token|auth|session|password|secret|apikey|checkkey|signature)\w*)"\s*:\s*"[^"]*"/gi,
+      '"$1":"[redacted]"')
+    .replace(/[A-Za-z0-9_-]{40,}/g, (m) =>
+      (/[A-Za-z]/.test(m) && /[0-9]/.test(m)) ? '[redacted]' : m);
+
+  return new Promise((resolve) => {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.har,application/json';
+    input.style.display = 'none';
+    document.body.appendChild(input);
+
+    input.onchange = async () => {
+      const file = (input.files || [])[0];
+      document.body.removeChild(input);
+      if (!file) return resolve(null);
+
+      let har;
+      try {
+        har = JSON.parse(await file.text());
+      } catch {
+        return resolve({ error: 'That file could not be read as a recording.' });
+      }
+      if (!Array.isArray(har?.log?.entries)) {
+        return resolve({ error: 'That is not a HAR recording.' });
+      }
+
+      const blocks = [];
+      for (const e of har.log.entries) {
+        const url = e?.request?.url;
+        const body = e?.response?.content?.text;
+        if (!url || !isFanslyApi(url)) continue;
+        if (typeof body !== 'string' || !/^\s*[{[]/.test(body)) continue;
+        blocks.push({ url, body: scrub(body).slice(0, 8000) });
+        if (blocks.length >= 120) break;
+      }
+      resolve({ blocks });
+    };
+    input.click();
+  });
+}
+
 /* Phone screenshots are 2-4 MB each. Sending them raw would be slow and would cost
    far more per call, so they are resized before they ever leave the browser. */
 function shrinkImage(file, maxSide = 1400, quality = 0.75) {
@@ -1079,6 +1134,32 @@ async function viewManager() {
       </div>
       <button class="sm ghost" id="scanStats" style="width:100%">📷 Or import from a screenshot</button>
       <div id="scanResult"></div>
+
+      <div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--line)">
+        <strong style="font-size:14px">Private stats</strong>
+        <div class="tiny" style="margin:5px 0 10px">
+          Earnings, traffic sources, watch time and top fans — the numbers only you can see.
+          You record your own Insights page once, and nothing is ever sent to Fansly.
+        </div>
+        <button class="sm ghost" id="importHar" style="width:100%">📁 Import a recording</button>
+        <button class="chip" id="harHow" style="margin-top:8px">How do I make one?</button>
+        <div id="harHelp" hidden class="tiny" style="margin-top:10px;line-height:1.65">
+          On a <b>computer</b>, in Chrome:
+          <ol style="margin:7px 0 0;padding-left:18px">
+            <li>Open Fansly and go to your <b>Insights</b> page.</li>
+            <li>Press <b>F12</b>, click the <b>Network</b> tab.</li>
+            <li>Reload the page and wait for all the numbers to appear.</li>
+            <li>Do the same on your <b>Earnings</b> page, in the same tab.</li>
+            <li>Click the <b>⤓ Export HAR</b> icon and save the file.</li>
+            <li>Come back here and import it.</li>
+          </ol>
+          <div style="margin-top:9px">
+            The file stays on your device — your login is stripped out here before
+            anything is uploaded.
+          </div>
+        </div>
+        <div id="harResult"></div>
+      </div>
     </div>
 
     <div class="card">
@@ -1222,7 +1303,75 @@ async function viewManager() {
       box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
     } finally {
       btn.disabled = false;
-      btn.textContent = '📷 Import my Fansly stats';
+      btn.textContent = '📷 Or import from a screenshot';
+    }
+  };
+
+  /* -- HAR import: reads a recording her browser already made. No request to Fansly. -- */
+  document.getElementById('harHow').onclick = (e) => {
+    const help = document.getElementById('harHelp');
+    help.hidden = !help.hidden;
+    e.currentTarget.textContent = help.hidden ? 'How do I make one?' : 'Hide the steps';
+  };
+
+  document.getElementById('importHar').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const box = document.getElementById('harResult');
+    box.innerHTML = '';
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Reading the file…';
+
+    try {
+      const picked = await pickHar();
+      if (!picked) return;
+      if (picked.error) throw new Error(picked.error);
+      if (!picked.blocks.length) {
+        throw Object.assign(new Error('No Fansly data in that recording.'), {
+          hint: 'The Network tab has to be recording while the Insights page loads its numbers.'
+        });
+      }
+
+      btn.textContent = `⏳ Reading ${picked.blocks.length} response(s)…`;
+      const res = await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } });
+
+      const metrics = Object.entries(res.metrics || {});
+      const rows = (title, list) => (list && list.length ? `
+        <div class="tiny" style="margin:12px 0 5px;font-weight:700">${title}</div>
+        ${list.map((r) => `
+          <div class="row between" style="padding:5px 2px">
+            <span class="tiny">${esc(r.label)}</span>
+            <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
+          </div>`).join('')}` : '');
+
+      const b = res.breakdowns || {};
+      box.innerHTML = `
+        <div class="alert info" style="margin-top:12px">
+          <strong>Read ${metrics.length} figure${metrics.length > 1 ? 's' : ''}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
+          Check them before saving. Nothing is stored until you tap save.
+        </div>
+        ${metrics.map(([k, v]) => `
+          <div class="row between" style="padding:6px 2px">
+            <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
+          </div>`).join('')}
+        ${rows('TRAFFIC SOURCES', b.traffic_sources)}
+        ${rows('TOP CONTENT', b.top_content)}
+        ${rows('HASHTAGS', b.hashtags)}
+        <button class="primary sm" id="saveHar" style="width:100%;margin-top:12px">Save this snapshot</button>`;
+
+      document.getElementById('saveHar').onclick = async () => {
+        await api('/platform', {
+          method: 'POST',
+          body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period || 'private stats' }
+        });
+        toast('📊 Snapshot saved');
+        viewManager();
+      };
+    } catch (err) {
+      box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📁 Import a recording';
     }
   };
 

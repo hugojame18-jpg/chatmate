@@ -253,65 +253,32 @@ export async function transcribeScreenshots({ config, images }) {
 }
 
 /**
- * Reads a screenshot of a Fansly stats / earnings / insights page and pulls the
- * numbers out of it. Deliberately schema-free: those pages differ a lot, so the
- * model returns whatever labels it actually sees rather than guessing at ours.
+ * The shape every stats reader returns, whatever it read from. Shared so a
+ * screenshot import and a HAR import can never drift into different schemas.
  */
-export async function extractStats({ config, images }) {
-  if (!config.llmProvider || config.llmProvider === 'mock') {
-    return { period: 'demo', metrics: { followers: 1234, subscribers: 56, earnings: 789 } };
-  }
+const STATS_SCHEMA = [
+  'Extract everything you can actually read. Return ONLY valid JSON, no code fence:',
+  '{',
+  '  "period": "what timeframe this covers, e.g. \\"last 30 days\\" or \\"March 2026\\", or \\"\\" if unclear",',
+  '  "metrics": { "snake_case_label": number, ... },',
+  '  "breakdowns": {',
+  '    "traffic_sources": [{"name": "where the visit came from", "share": percentage as a number}],',
+  '    "top_content":     [{"title": "post or media label", "value": number, "unit": "views|likes|earnings|purchases"}],',
+  '    "hashtags":        [{"tag": "#thetag", "value": number, "unit": "views|posts|engagement"}]',
+  '  }',
+  '}',
+  '',
+  'Rules:',
+  '- Use the label as shown, lowercased with underscores: "total earnings" -> "total_earnings".',
+  '- Numbers only: strip currency symbols, commas and percent signs. "1,234.50" -> 1234.5, "12%" -> 12.',
+  '- Watch time, average view duration and engagement rate go in "metrics" as numbers.',
+  '  Convert durations to seconds: "1m 30s" -> 90, "2:15" -> 135.',
+  '- Any breakdown you cannot see must be an empty array. Never invent a source, a tag or a title.',
+  '- Do not invent a metric you cannot see. Do not guess. Omit anything unreadable.'
+].join('\n');
 
-  const visionConfig = {
-    ...config,
-    llmModel: (config.llmVisionModel || '').trim() || config.llmModel
-  };
-
-  const instructions = [
-    'These are screenshots of the statistics, earnings or insights pages of an adult',
-    'content creator account (Fansly or similar).',
-    '',
-    'Extract everything you can actually read. Return ONLY valid JSON, no code fence:',
-    '{',
-    '  "period": "what timeframe the screen covers, e.g. \\"last 30 days\\" or \\"March 2026\\", or \\"\\" if unclear",',
-    '  "metrics": { "snake_case_label": number, ... },',
-    '  "breakdowns": {',
-    '    "traffic_sources": [{"name": "where the visit came from", "share": percentage as a number}],',
-    '    "top_content":     [{"title": "post or media label", "value": number, "unit": "views|likes|earnings|purchases"}],',
-    '    "hashtags":        [{"tag": "#thetag", "value": number, "unit": "views|posts|engagement"}]',
-    '  }',
-    '}',
-    '',
-    'Rules:',
-    '- Use the label shown on screen, lowercased with underscores: "total earnings" -> "total_earnings".',
-    '- Numbers only: strip currency symbols, commas and percent signs. "1,234.50" -> 1234.5, "12%" -> 12.',
-    '- Watch time, average view duration and engagement rate go in "metrics" as numbers.',
-    '  Convert durations to seconds: "1m 30s" -> 90, "2:15" -> 135.',
-    '- Read values off charts and bars too, including the labels around a pie or donut.',
-    '- Any breakdown you cannot see must be an empty array. Never invent a source, a tag or a title.',
-    '- Do not invent a metric you cannot see. Do not guess. Omit anything unreadable.',
-    '- If several screenshots cover the same metric, keep the clearest value once.',
-    '- Ignore navigation, buttons and decorative text.'
-  ].join('\n');
-
-  const content = [{ type: 'text', text: instructions }];
-  for (const url of images) content.push({ type: 'image_url', image_url: { url } });
-
-  const { text: raw } = await rawCompletion({
-    config: visionConfig,
-    messages: [{ role: 'user', content }],
-    temperature: 0.1,
-    maxTokens: 2000
-  });
-
-  const parsed = extractJson(raw);
-  if (!parsed || typeof parsed.metrics !== 'object' || !parsed.metrics) {
-    throw new LlmError('Could not read any numbers from those screenshots.', {
-      hint: 'Make sure the figures are legible, and try one page at a time.'
-    });
-  }
-
-  // Keep only clean numeric values: a metric the app cannot plot is worse than none.
+/** Coerces a model's answer into storable numbers. Anything unclean is dropped. */
+function normalizeStats(parsed) {
   const metrics = {};
   for (const [key, value] of Object.entries(parsed.metrics)) {
     const n = typeof value === 'number' ? value : Number(String(value).replace(/[^0-9.-]/g, ''));
@@ -345,9 +312,107 @@ export async function extractStats({ config, images }) {
   const hasAnything = Object.keys(metrics).length ||
     Object.values(breakdowns).some((v) => v.length);
 
-  if (!hasAnything) throw new LlmError('No readable numbers in those screenshots.');
+  return { period: String(parsed.period || '').slice(0, 60), metrics, breakdowns, hasAnything };
+}
 
-  return { period: String(parsed.period || '').slice(0, 60), metrics, breakdowns };
+/**
+ * Reads a HAR recording of her own insights pages. The blocks arrive already
+ * redacted and capped by src/har.js — this only turns raw endpoint JSON into the
+ * same numbers a screenshot import would have produced.
+ */
+export async function extractStatsFromHar({ config, blocks }) {
+  if (!config.llmProvider || config.llmProvider === 'mock') {
+    return { period: 'demo', metrics: { followers: 1234, subscribers: 56, earnings: 789 }, breakdowns: {} };
+  }
+
+  const dump = blocks
+    .map((b) => `### ${b.path}\n${b.body}`)
+    .join('\n\n');
+
+  const instructions = [
+    'Below are raw JSON responses captured from the private API of an adult content',
+    'creator account (Fansly), one block per endpoint. The creator recorded her own',
+    'session; these are her own figures.',
+    '',
+    STATS_SCHEMA,
+    '- The endpoint path above each block tells you what the numbers mean.',
+    '- Amounts are usually in cents: 5000 means 50. Convert to whole currency units.',
+    '- Timestamps are usually milliseconds since epoch. Never report one as a metric.',
+    '- Ignore ids, flags, urls and "[redacted]" values. They are not statistics.',
+    '- Prefer totals over per-row values, but use per-row data to fill the breakdowns.',
+    '',
+    dump
+  ].join('\n');
+
+  const { text: raw } = await rawCompletion({
+    config,
+    messages: [{ role: 'user', content: instructions }],
+    temperature: 0.1,
+    maxTokens: 2000
+  });
+
+  const parsed = extractJson(raw);
+  if (!parsed || typeof parsed.metrics !== 'object' || !parsed.metrics) {
+    throw new LlmError('Could not read any figures out of that recording.', {
+      hint: 'Open your Fansly Insights and Earnings pages, let them finish loading, then export the HAR again.'
+    });
+  }
+
+  const { hasAnything, ...stats } = normalizeStats(parsed);
+  if (!hasAnything) {
+    throw new LlmError('That recording had no statistics in it.', {
+      hint: 'Record again with the Insights page open — the Network tab must be capturing while the numbers load.'
+    });
+  }
+  return stats;
+}
+
+/**
+ * Reads a screenshot of a Fansly stats / earnings / insights page and pulls the
+ * numbers out of it. Deliberately schema-free: those pages differ a lot, so the
+ * model returns whatever labels it actually sees rather than guessing at ours.
+ */
+export async function extractStats({ config, images }) {
+  if (!config.llmProvider || config.llmProvider === 'mock') {
+    return { period: 'demo', metrics: { followers: 1234, subscribers: 56, earnings: 789 } };
+  }
+
+  const visionConfig = {
+    ...config,
+    llmModel: (config.llmVisionModel || '').trim() || config.llmModel
+  };
+
+  const instructions = [
+    'These are screenshots of the statistics, earnings or insights pages of an adult',
+    'content creator account (Fansly or similar).',
+    '',
+    STATS_SCHEMA,
+    '- Read values off charts and bars too, including the labels around a pie or donut.',
+    '- If several screenshots cover the same metric, keep the clearest value once.',
+    '- Ignore navigation, buttons and decorative text.'
+  ].join('\n');
+
+  const content = [{ type: 'text', text: instructions }];
+  for (const url of images) content.push({ type: 'image_url', image_url: { url } });
+
+  const { text: raw } = await rawCompletion({
+    config: visionConfig,
+    messages: [{ role: 'user', content }],
+    temperature: 0.1,
+    maxTokens: 2000
+  });
+
+  const parsed = extractJson(raw);
+  if (!parsed || typeof parsed.metrics !== 'object' || !parsed.metrics) {
+    throw new LlmError('Could not read any numbers from those screenshots.', {
+      hint: 'Make sure the figures are legible, and try one page at a time.'
+    });
+  }
+
+  // Keep only clean numeric values: a metric the app cannot plot is worse than none.
+  const { hasAnything, ...stats } = normalizeStats(parsed);
+  if (!hasAnything) throw new LlmError('No readable numbers in those screenshots.');
+  return stats;
 }
 
 /**

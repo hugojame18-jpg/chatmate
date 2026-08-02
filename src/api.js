@@ -9,14 +9,16 @@ import {
 } from './strategy.js';
 import { buildMessagesPayload } from './prompt.js';
 import {
-  extractProfile, extractStats, generateSuggestions, generateText, transcribeScreenshots, LlmError
+  extractProfile, extractStats, extractStatsFromHar, generateSuggestions, generateText,
+  transcribeScreenshots, LlmError
 } from './llm.js';
+import { collectFromHar, prepare } from './har.js';
 import { buildManagerPayload, buildStrategyPayload, buildSnapshot } from './manager.js';
 import { fetchAccount, FanslyError } from './fansly.js';
 import { screenIncoming, screenOutgoing } from './safety.js';
 
 const ok = (data) => ({ status: 200, body: data });
-const bad = (message, status = 400) => ({ status, body: { error: message } });
+const bad = (message, status = 400, extra) => ({ status, body: { error: message, ...extra } });
 
 function decorateFan(fan, config) {
   const lastFanMsg = db.db
@@ -443,6 +445,31 @@ export const routes = {
 
     try {
       return ok(await extractStats({ config: db.getConfig(userId), images }));
+    } catch (err) {
+      if (err instanceof LlmError) {
+        return { status: 502, body: { error: err.message, hint: err.hint, provider_error: true } };
+      }
+      throw err;
+    }
+  },
+
+  // HAR import: her browser already recorded these responses, so this route
+  // reads a file and never contacts Fansly. `prepare` re-runs the redaction
+  // server-side even though the browser already did it — the file may contain
+  // her session token, and that must never reach a model.
+  'POST /api/platform/har': async ({ body, userId }) => {
+    const raw = Array.isArray(body?.blocks) ? body.blocks : collectFromHar(body?.har);
+    const { blocks, chars } = prepare(raw);
+
+    if (!blocks.length) {
+      return bad('No Fansly statistics in that recording.', 400, {
+        hint: 'Record with the Network tab open on your Insights or Earnings page, and let the numbers finish loading before exporting.'
+      });
+    }
+
+    try {
+      const stats = await extractStatsFromHar({ config: db.getConfig(userId), blocks });
+      return ok({ ...stats, sources: blocks.map((b) => b.path), chars });
     } catch (err) {
       if (err instanceof LlmError) {
         return { status: 502, body: { error: err.message, hint: err.hint, provider_error: true } };
