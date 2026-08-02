@@ -157,7 +157,10 @@ for (const sql of [
   'ALTER TABLE strategies ADD COLUMN user_id INTEGER',
   // Categorical insights: traffic sources, hashtags, best posts. Kept apart from
   // `metrics` because these are lists and shares, not single numbers.
-  'ALTER TABLE platform_stats ADD COLUMN breakdowns TEXT'
+  'ALTER TABLE platform_stats ADD COLUMN breakdowns TEXT',
+  // Whether he pays the monthly subscription. Separate from total_spent: a fan can
+  // subscribe and never buy a PPV, or buy plenty without ever subscribing.
+  'ALTER TABLE fans ADD COLUMN is_subscriber INTEGER DEFAULT 0'
 ]) {
   try { db.exec(sql); } catch { /* column already there */ }
 }
@@ -315,25 +318,34 @@ export function getFan(userId, id) {
 }
 
 export function createFan(userId, {
-  handle, display_name = '', notes = '', kinks = '', timezone = '', personality = ''
+  handle, display_name = '', notes = '', kinks = '', timezone = '', personality = '',
+  is_subscriber = 0
 }) {
   const ts = nowISO();
   const info = db.prepare(`
-    INSERT INTO fans(user_id, handle, display_name, notes, kinks, timezone, personality, created_at, last_activity)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
-  `).run(userId, handle, display_name, notes, kinks, timezone, personality, ts, ts);
+    INSERT INTO fans(user_id, handle, display_name, notes, kinks, timezone, personality,
+                     is_subscriber, created_at, last_activity)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(userId, handle, display_name, notes, kinks, timezone, personality,
+    is_subscriber ? 1 : 0, ts, ts);
   return getFan(userId, Number(info.lastInsertRowid));
 }
 
 const FAN_FIELDS = [
-  'handle', 'display_name', 'notes', 'kinks', 'timezone', 'personality', 'blocked', 'block_reason'
+  'handle', 'display_name', 'notes', 'kinks', 'timezone', 'personality', 'blocked',
+  'block_reason', 'is_subscriber'
 ];
+
+// Columns that hold a flag. node:sqlite refuses to bind a JS boolean, so a
+// `true` arriving from the browser has to become 1 before it reaches a query.
+const FAN_FLAGS = new Set(['blocked', 'is_subscriber']);
 
 export function updateFan(userId, id, patch) {
   const keys = Object.keys(patch).filter((k) => FAN_FIELDS.includes(k));
   if (keys.length) {
+    const values = keys.map((k) => (FAN_FLAGS.has(k) ? (patch[k] ? 1 : 0) : patch[k]));
     const sql = `UPDATE fans SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND user_id = ?`;
-    db.prepare(sql).run(...keys.map((k) => patch[k]), id, userId);
+    db.prepare(sql).run(...values, id, userId);
   }
   return getFan(userId, id);
 }
@@ -505,6 +517,104 @@ export function offerStats(userId) {
     byMedia: conversionBy(userId, 'media_title'),
     byStage: conversionBy(userId, 'stage')
   };
+}
+
+/* ------------------------------- Dashboard --------------------------------- */
+
+/**
+ * Money in, day by day, for the last `days` days. Every day is present even when
+ * nothing came in — a chart with the empty days missing squeezes the gaps out and
+ * makes a quiet week look like a busy one.
+ */
+export function revenueByDay(userId, days = 30) {
+  const rows = db.prepare(`
+    SELECT substr(p.created_at, 1, 10) AS day, SUM(p.amount) AS total, COUNT(*) AS count
+    FROM purchases p
+    JOIN fans f ON f.id = p.fan_id
+    WHERE f.user_id = ? AND p.created_at >= ?
+    GROUP BY day
+  `).all(userId, new Date(Date.now() - days * 86400000).toISOString());
+
+  const byDay = new Map(rows.map((r) => [r.day, r]));
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    const hit = byDay.get(day);
+    out.push({ day, total: hit ? Number(hit.total) : 0, count: hit ? hit.count : 0 });
+  }
+  return out;
+}
+
+/** Revenue over a window, so this month can be compared with the one before it. */
+export function revenueBetween(userId, fromISO, toISO) {
+  const row = db.prepare(`
+    SELECT SUM(p.amount) AS total, COUNT(*) AS count
+    FROM purchases p
+    JOIN fans f ON f.id = p.fan_id
+    WHERE f.user_id = ? AND p.created_at >= ? AND p.created_at < ?
+  `).get(userId, fromISO, toISO);
+  return { total: Number(row?.total || 0), count: row?.count || 0 };
+}
+
+/**
+ * Headline totals as numbers. buildSnapshot has its own copy of these, but that
+ * one is written for the AI prompt: the amounts are `.toFixed(0)` strings, already
+ * rounded and no longer arithmetic. A dashboard has to add them up, so it gets
+ * them raw from here instead of re-parsing text meant for a model.
+ */
+export function accountTotals(userId) {
+  const f = db.prepare(`
+    SELECT COUNT(*) AS fans,
+           SUM(CASE WHEN total_spent > 0 THEN 1 ELSE 0 END) AS paying,
+           SUM(CASE WHEN is_subscriber = 1 THEN 1 ELSE 0 END) AS subscribers,
+           SUM(CASE WHEN blocked = 1 THEN 1 ELSE 0 END) AS blocked,
+           SUM(total_spent) AS revenue
+    FROM fans WHERE user_id = ?
+  `).get(userId);
+
+  const p = db.prepare(`
+    SELECT COUNT(*) AS purchases FROM purchases p
+    JOIN fans fa ON fa.id = p.fan_id WHERE fa.user_id = ?
+  `).get(userId);
+
+  const fans = f?.fans || 0;
+  const paying = f?.paying || 0;
+  const revenue = Number(f?.revenue || 0);
+  const purchases = p?.purchases || 0;
+
+  return {
+    fans,
+    paying,
+    subscribers: f?.subscribers || 0,
+    blocked: f?.blocked || 0,
+    revenue,
+    purchases,
+    conversion: fans ? Math.round((paying / fans) * 100) : 0,
+    avg_order: purchases ? revenue / purchases : 0
+  };
+}
+
+export function subscriberCount(userId) {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS n FROM fans WHERE user_id = ? AND is_subscriber = 1'
+  ).get(userId);
+  return row?.n || 0;
+}
+
+/** New fans per day, same padded shape as revenueByDay. */
+export function newFansByDay(userId, days = 30) {
+  const rows = db.prepare(`
+    SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS count
+    FROM fans WHERE user_id = ? AND created_at >= ? GROUP BY day
+  `).all(userId, new Date(Date.now() - days * 86400000).toISOString());
+
+  const byDay = new Map(rows.map((r) => [r.day, r.count]));
+  const out = [];
+  for (let i = days - 1; i >= 0; i--) {
+    const day = new Date(Date.now() - i * 86400000).toISOString().slice(0, 10);
+    out.push({ day, count: byDay.get(day) || 0 });
+  }
+  return out;
 }
 
 /* --------------------------- Platform snapshots ---------------------------- */

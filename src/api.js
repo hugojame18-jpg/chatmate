@@ -61,7 +61,10 @@ export const routes = {
     return ok({ ...saved, llmApiKey: saved.llmApiKey ? '••••••••' : '', hasKey: !!saved.llmApiKey });
   },
 
-  'GET /api/dashboard': ({ userId }) => {
+  // Named for what it serves. It used to be called /api/dashboard, which collided
+  // with the real dashboard: two identical keys in this object, the second one
+  // silently winning, and the Follow-ups tab breaking with no error anywhere.
+  'GET /api/followups': ({ userId }) => {
     const config = db.getConfig(userId);
     const fans = db.listFans(userId).map((f) => decorateFan(f, config));
     return ok({
@@ -476,6 +479,42 @@ export const routes = {
       }
       throw err;
     }
+  },
+
+  /* ------------------------------ Dashboard ------------------------------- */
+
+  // Everything the dashboard draws, computed here rather than in the browser so
+  // the numbers cannot drift between what is shown and what the manager reasons on.
+  'GET /api/dashboard': ({ userId }) => {
+    const snapshot = buildSnapshot(userId);
+    const now = new Date();
+
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
+    const thisMonth = db.revenueBetween(userId, monthStart, now.toISOString());
+    const lastMonth = db.revenueBetween(userId, prevStart, monthStart);
+
+    const days = db.revenueByDay(userId, 30);
+    const last30 = days.reduce((s, d) => s + d.total, 0);
+
+    return ok({
+      currency: snapshot.currency,
+      totals: db.accountTotals(userId),
+      byStage: snapshot.byStage,
+      topSpenders: snapshot.topSpenders.slice(0, 5),
+      goingQuiet: snapshot.goingQuiet.length,
+      revenueByDay: days,
+      newFansByDay: db.newFansByDay(userId, 30),
+      last30,
+      thisMonth: thisMonth.total,
+      lastMonth: lastMonth.total,
+      // Null rather than 0 when there is nothing to compare against: "+0%" against
+      // an empty month is a made-up number, and she would act on it.
+      monthDelta: lastMonth.total > 0
+        ? Math.round(((thisMonth.total - lastMonth.total) / lastMonth.total) * 100)
+        : null,
+      offers: db.offerStats(userId)
+    });
   },
 
   'GET /api/platform': ({ userId }) => ok(db.listPlatformStats(userId, 12)),

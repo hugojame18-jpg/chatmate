@@ -262,7 +262,9 @@ const initials = (s) => String(s || '?').replace(/^@/, '').slice(0, 2).toUpperCa
 
 function money(n, cur = 'USD') {
   const sym = { USD: '$', EUR: '€', GBP: '£' }[cur] || '';
-  return cur === 'USD' || cur === 'GBP' ? `${sym}${Number(n || 0).toFixed(0)}` : `${Number(n || 0).toFixed(0)}${sym}`;
+  // Grouped, so four figures stay readable at a glance: 1,325 not 1325.
+  const amount = Math.round(Number(n) || 0).toLocaleString('en-US');
+  return cur === 'USD' || cur === 'GBP' ? `${sym}${amount}` : `${amount}${sym}`;
 }
 
 function ago(days) {
@@ -270,6 +272,77 @@ function ago(days) {
   if (days === 0) return 'today';
   if (days === 1) return 'yesterday';
   return `${days}d ago`;
+}
+
+/* ---------------------------------- Charts --------------------------------- */
+
+/* Hand-drawn SVG, because this app ships no dependencies. Every chart here plots a
+   single series, so colour carries magnitude, not identity: one hue, and the
+   ordered stage ramp below goes light -> bright as a fan gets more valuable.
+   Contrast of every step against the card surface was measured, not guessed. */
+const STAGE_RAMP = ['#9c5a86', '#c25f92', '#e35f9a', '#ff5fa2'];
+
+/**
+ * Daily columns over a period. Bars are capped thin with a rounded cap and a
+ * square baseline, and every day is drawn even when it is empty — dropping the
+ * blank days would silently compress the gaps and flatter a quiet week.
+ */
+function columnChart(points, { format = (v) => v, label = '' } = {}) {
+  const W = 320, H = 96, PAD = 2;
+  const peak = Math.max(...points.map((p) => p.value), 0);
+  if (!peak) {
+    return `<div class="tiny" style="padding:22px 0;text-align:center">Nothing yet over this period.</div>`;
+  }
+
+  const slot = W / points.length;
+  const barW = Math.min(slot - PAD, 24);
+  const best = points.reduce((a, b) => (b.value > a.value ? b : a), points[0]);
+
+  const bars = points.map((p, i) => {
+    const h = p.value ? Math.max(3, (p.value / peak) * (H - 22)) : 0;
+    const x = i * slot + (slot - barW) / 2;
+    const y = H - h;
+    // An empty day gets an invisible hit area, not a stub: a row of little marks
+    // along the baseline reads as a dashed axis, and the axis is never dashed.
+    if (!h) return `<rect x="${x.toFixed(1)}" y="0" width="${barW.toFixed(1)}" height="${H}" fill="transparent"><title>${esc(p.label)}: ${esc(format(0))}</title></rect>`;
+    // Rounded cap, square foot: rx on a rect rounds all four corners, so the
+    // baseline end is squared off again with a small overlapping rect.
+    return `
+      <g>
+        <rect x="${x.toFixed(1)}" y="${y.toFixed(1)}" width="${barW.toFixed(1)}" height="${h.toFixed(1)}" rx="4" fill="${p.value === best.value ? '#ff5fa2' : '#c25f92'}"/>
+        <rect x="${x.toFixed(1)}" y="${(H - 4).toFixed(1)}" width="${barW.toFixed(1)}" height="4" fill="${p.value === best.value ? '#ff5fa2' : '#c25f92'}"/>
+        <title>${esc(p.label)}: ${esc(format(p.value))}</title>
+      </g>`;
+  }).join('');
+
+  return `
+    <svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" role="img"
+         aria-label="${esc(label)}. Peak ${esc(format(peak))} on ${esc(best.label)}."
+         style="display:block;overflow:visible">
+      <line x1="0" y1="${H}" x2="${W}" y2="${H}" stroke="#372c52" stroke-width="1"/>
+      ${bars}
+    </svg>`;
+}
+
+/** Ranked horizontal bars. One hue; the leader is emphasised, the rest recede. */
+function rankedBars(rows, { format = (v) => v, ramp = null } = {}) {
+  if (!rows.length) return '';
+  const peak = Math.max(...rows.map((r) => r.value), 1);
+
+  return `<div class="bars">${rows.map((r, i) => `
+    <div class="bar-row">
+      <span class="bar-label">${esc(r.label)}</span>
+      <span class="bar-track">
+        <span class="bar-fill" style="width:${
+          // Zero gets an empty track. A minimum-width stub on a zero draws ink
+          // where there is no data, and reads as "a little" instead of "none".
+          r.value ? Math.max(3, (r.value / peak) * 100) : 0
+        }%;background:${
+          ramp ? ramp[Math.min(i, ramp.length - 1)] : (i === 0 ? '#ff5fa2' : '#c25f92')
+        }"></span>
+      </span>
+      <span class="bar-value">${esc(format(r.value))}</span>
+    </div>`).join('')}</div>`;
 }
 
 /* ---------------------------------- State --------------------------------- */
@@ -307,7 +380,9 @@ async function viewFans() {
       <div class="avatar" style="${avatarStyle(f.handle)}">${esc(initials(f.display_name || f.handle))}</div>
       <div class="grow">
         <div class="row between" style="margin-bottom:3px">
-          <strong class="truncate">${esc(f.display_name || f.handle)}</strong>
+          <strong class="truncate">
+            ${esc(f.display_name || f.handle)}${f.is_subscriber ? ' <span class="sub-badge" title="Subscriber">★</span>' : ''}
+          </strong>
           <span class="tiny">${money(f.total_spent, cur)}</span>
         </div>
         <div class="tiny truncate" style="margin-bottom:5px">
@@ -393,7 +468,7 @@ async function viewRelances() {
   setTab('relances');
   view.innerHTML = '<div class="loading">Loading…</div>';
 
-  const dash = await api('/dashboard');
+  const dash = await api('/followups');
   const cur = config.currency;
 
   view.innerHTML = `
@@ -497,6 +572,14 @@ async function viewFan(id) {
         <div class="tiny" id="personaHint">${esc(personalities.find((p) => p.key === strategy.personality)?.hint || '')}</div>
 
         <hr />
+
+        <label class="switch">
+          <input type="checkbox" id="fSub" ${fan.is_subscriber ? 'checked' : ''} />
+          <span>
+            <b>Pays the monthly subscription</b>
+            <span class="tiny">Counted on the dashboard. Saves as soon as you tap it.</span>
+          </span>
+        </label>
 
         <div><label>His name — fill this in, or the AI will invent one</label><input id="fDisplay" value="${esc(fan.display_name)}" /></div>
         <div><label>What he likes (fed into every generation)</label><textarea id="fKinks" style="min-height:64px">${esc(fan.kinks)}</textarea></div>
@@ -621,6 +704,20 @@ function wireFanCard(id, personalities) {
       toast(`Now playing ${p?.label}`);
     };
   });
+
+  /* Saved on the spot rather than behind the Save button: it is a single flag she
+     flips while reading his card, and losing it because she closed the sheet would
+     quietly corrupt the subscriber count on the dashboard. */
+  $('#fSub').onchange = async (e) => {
+    const on = e.currentTarget.checked;
+    try {
+      await api(`/fans/${id}`, { method: 'PATCH', body: { is_subscriber: on ? 1 : 0 } });
+      toast(on ? '⭐ Marked as a subscriber' : 'No longer a subscriber');
+    } catch (err) {
+      e.currentTarget.checked = !on;      // never leave the box lying about the data
+      toast(err.message);
+    }
+  };
 
   $('#saveFan').onclick = async () => {
     await api(`/fans/${id}`, {
@@ -1330,18 +1427,18 @@ function breakdownBlocks(breakdowns) {
 }
 
 /** Which of the three Manager panes is open. Survives a re-render. */
-let managerPane = 'chat';
+let managerPane = 'stats';
 
 async function viewManager() {
   setHeader('Manager');
   setTab('manager');
   view.innerHTML = '<div class="loading">Loading…</div>';
 
-  const [{ messages, snapshot }, stats, platform, strategies] = await Promise.all([
-    api('/manager'), api('/stats'), api('/platform'), api('/strategy')
+  const [{ messages, snapshot }, stats, platform, strategies, dash] = await Promise.all([
+    api('/manager'), api('/stats'), api('/platform'), api('/strategy'), api('/dashboard')
   ]);
   const cur = snapshot.currency;
-  const t = snapshot.totals;
+  const t = dash.totals;
 
   // Under this many resolved pitches a percentage is noise, so it is shown greyed
   // out rather than as a result she should act on.
@@ -1426,18 +1523,71 @@ async function viewManager() {
         </div>`}
     </div>`;
 
+  const day = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+
+  const delta = dash.monthDelta === null
+    ? '<span class="delta flat">no month to compare yet</span>'
+    : `<span class="delta ${dash.monthDelta > 0 ? 'up' : dash.monthDelta < 0 ? 'down' : 'flat'}">
+         ${dash.monthDelta > 0 ? '▲' : dash.monthDelta < 0 ? '▼' : '='} ${Math.abs(dash.monthDelta)}% vs last month
+       </span>`;
+
+  const stageRows = Object.entries(dash.byStage).map(([label, value]) => ({ label, value }));
+
   const statsPane = `
-    <div class="hero">
-      <div class="greet">Your account, in numbers</div>
-      <div class="headline"><em>${money(t.revenue, cur)}</em> earned so far</div>
+    <div class="card">
+      <div class="tiny">This month</div>
+      <div class="figure">${money(dash.thisMonth, cur)}</div>
+      <div style="margin-top:4px">${delta}</div>
+      <div class="tiny" style="margin-top:10px">
+        ${money(dash.last30, cur)} over the last 30 days · ${money(t.revenue, cur)} all time
+      </div>
     </div>
 
     <div class="stat-grid" style="margin-bottom:14px">
-      <div class="stat hi"><b>${stats.rate === null ? '—' : stats.rate + '%'}</b><span class="tiny">pitch → sale</span></div>
-      <div class="stat"><b>${t.conversion}%</b><span class="tiny">${t.paying}/${t.fans} paying</span></div>
+      <div class="stat hi"><b>${t.subscribers}</b><span class="tiny">subscribers</span></div>
+      <div class="stat"><b>${stats.rate === null ? '—' : stats.rate + '%'}</b><span class="tiny">pitch → sale</span></div>
       <div class="stat"><b>${money(t.avg_order, cur)}</b><span class="tiny">avg order</span></div>
-      <div class="stat"><b>${snapshot.goingQuiet.length}</b><span class="tiny">going quiet</span></div>
+      <div class="stat"><b>${dash.goingQuiet}</b><span class="tiny">going quiet</span></div>
     </div>
+
+    <div class="card">
+      <div class="chart-head">
+        <h2 style="margin:0">Money in</h2>
+        <span class="tiny">last 30 days</span>
+      </div>
+      ${columnChart(
+        dash.revenueByDay.map((d) => ({ label: day(d.day), value: d.total })),
+        { format: (v) => money(v, cur), label: 'Revenue per day over the last 30 days' }
+      )}
+    </div>
+
+    <div class="card">
+      <div class="chart-head">
+        <h2 style="margin:0">New fans</h2>
+        <span class="tiny">last 30 days</span>
+      </div>
+      ${columnChart(
+        dash.newFansByDay.map((d) => ({ label: day(d.day), value: d.count })),
+        { format: (v) => `${v} fan${v === 1 ? '' : 's'}`, label: 'New fans per day over the last 30 days' }
+      )}
+    </div>
+
+    <div class="card">
+      <div class="chart-head">
+        <h2 style="margin:0">Where your fans are</h2>
+        <span class="tiny">${t.fans} total</span>
+      </div>
+      ${rankedBars(stageRows, { ramp: STAGE_RAMP })}
+    </div>
+
+    ${dash.topSpenders.length ? `
+      <div class="card">
+        <h2>Top spenders</h2>
+        ${rankedBars(
+          dash.topSpenders.map((s) => ({ label: s.who, value: Number(s.spent) })),
+          { format: (v) => money(v, cur) }
+        )}
+      </div>` : ''}
 
     ${perf}
 
@@ -1470,7 +1620,7 @@ async function viewManager() {
 
   view.innerHTML = `
     <div class="segmented">
-      ${[['chat', '💬 Chat'], ['stats', '📊 Stats'], ['plan', '🚀 Plan']]
+      ${[['stats', '📊 Dashboard'], ['chat', '💬 Chat'], ['plan', '🚀 Plan']]
         .map(([k, label]) => `<button data-pane="${k}" class="${managerPane === k ? 'on' : ''}">${label}</button>`)
         .join('')}
     </div>

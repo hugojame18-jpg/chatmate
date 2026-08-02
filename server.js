@@ -4,6 +4,7 @@
 
 import { createServer } from 'node:http';
 import { readFile, stat } from 'node:fs/promises';
+import { readFileSync } from 'node:fs';
 import { join, extname, normalize } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dirname } from 'node:path';
@@ -28,6 +29,23 @@ const MIME = {
 };
 
 /* ------------------------------- Routage ---------------------------------- */
+
+/* `routes` is an object literal, so writing the same key twice is not an error:
+   the second one silently wins and the first route quietly disappears. That is
+   how /api/dashboard once ate the Follow-ups tab. By the time the object exists
+   the duplicate is already gone, so the only place to catch it is the source. */
+try {
+  const src = readFileSync(new URL('./src/api.js', import.meta.url), 'utf8');
+  const keys = [...src.matchAll(/^\s*'((?:GET|POST|PATCH|DELETE|PUT) \/[^']*)':/gm)].map((m) => m[1]);
+  const dupes = keys.filter((k, i) => keys.indexOf(k) !== i);
+  if (dupes.length) {
+    console.error(`\n  FATAL: duplicate route(s): ${[...new Set(dupes)].join(', ')}`);
+    console.error('  One of them is unreachable. Rename it before starting.\n');
+    process.exit(1);
+  }
+} catch (err) {
+  if (err?.code !== 'ENOENT') throw err;   // bundled or moved: skip the check
+}
 
 const compiled = Object.entries(routes).map(([key, handler]) => {
   const [method, pattern] = key.split(' ');
