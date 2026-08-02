@@ -195,6 +195,15 @@ function localAddresses() {
   return out;
 }
 
+/* Node drops an idle keep-alive connection after 5 seconds by default. Railway's
+   edge proxy holds those connections open for much longer and reuses them, so it
+   regularly sends a request down a socket Node is closing at that exact moment.
+   The request dies in flight and the browser reports it as "Failed to fetch" —
+   which is why curl, opening a fresh connection every time, never reproduces it.
+   The server must outlive the proxy's idle window, not the other way round. */
+server.keepAliveTimeout = 65000;
+server.headersTimeout = 70000;   // must stay above keepAliveTimeout
+
 server.listen(PORT, '0.0.0.0', () => {
   console.log('\n  chatmate — reply assistant');
   console.log('  ---------------------------------');

@@ -22,15 +22,26 @@ function toast(msg) {
 }
 
 async function api(path, { method = 'GET', body } = {}) {
-  const res = await fetch(`/api${path}`, {
+  const send = () => fetch(`/api${path}`, {
     method,
     headers: body ? { 'Content-Type': 'application/json' } : undefined,
     body: body ? JSON.stringify(body) : undefined
   });
-  if (res.status === 401) {
-    location.href = '/login.html';
-    throw new Error('Session expired.');
+
+  let res;
+  try {
+    res = await send();
+  } catch (err) {
+    /* The request never left, or died on a connection that was being closed at
+       both ends at once. Reading the same data again is free and harmless, so
+       one silent retry turns a visible error into nothing at all. Writes are
+       never retried: a repeated POST can bill a second AI call or duplicate a
+       row, and a wrong write is worse than a visible failure. */
+    if (method !== 'GET') throw err;
+    await new Promise((r) => setTimeout(r, 400));
+    res = await send();
   }
+
   // Session expired or signed out elsewhere: back to the login screen.
   if (res.status === 401) { location.href = '/login.html'; throw new Error('Signed out'); }
 
