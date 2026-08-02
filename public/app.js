@@ -1525,21 +1525,24 @@ async function viewManager() {
 
   const day = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
 
-  const delta = dash.monthDelta === null
-    ? '<span class="delta flat">no month to compare yet</span>'
-    : `<span class="delta ${dash.monthDelta > 0 ? 'up' : dash.monthDelta < 0 ? 'down' : 'flat'}">
-         ${dash.monthDelta > 0 ? '▲' : dash.monthDelta < 0 ? '▼' : '='} ${Math.abs(dash.monthDelta)}% vs last month
+  const delta = dash.delta30 === null
+    ? '<span class="delta flat">nothing yet to compare against</span>'
+    : `<span class="delta ${dash.delta30 > 0 ? 'up' : dash.delta30 < 0 ? 'down' : 'flat'}">
+         ${dash.delta30 > 0 ? '▲' : dash.delta30 < 0 ? '▼' : '='} ${Math.abs(dash.delta30)}%
+         <span class="tiny" style="font-weight:400">vs the 30 days before</span>
        </span>`;
 
   const stageRows = Object.entries(dash.byStage).map(([label, value]) => ({ label, value }));
 
   const statsPane = `
     <div class="card">
-      <div class="tiny">This month</div>
-      <div class="figure">${money(dash.thisMonth, cur)}</div>
+      <div class="tiny">Last 30 days</div>
+      <div class="figure">${money(dash.last30, cur)}</div>
       <div style="margin-top:4px">${delta}</div>
       <div class="tiny" style="margin-top:10px">
-        ${money(dash.last30, cur)} over the last 30 days · ${money(t.revenue, cur)} all time
+        ${money(dash.thisMonth, cur)} so far this month ·
+        ${money(dash.lastMonthFull, cur)} last month ·
+        ${money(t.revenue, cur)} all time
       </div>
     </div>
 

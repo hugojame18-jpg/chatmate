@@ -396,7 +396,19 @@ export const routes = {
     if (!fan) return bad('Fan not found.', 404);
     const amount = Number(body?.amount);
     if (!Number.isFinite(amount) || amount <= 0) return bad('Invalid amount.');
-    const updated = db.addPurchase(userId, fan.id, amount, String(body?.label || '').trim());
+
+    // Optional back-date, for a sale logged a day or two late. Rejected outright if
+    // it is not a real past date: a bad timestamp would land the money on a random
+    // day of the chart, and a wrong chart is worse than a refused entry.
+    let when = null;
+    if (body?.created_at) {
+      const d = new Date(body.created_at);
+      if (Number.isNaN(d.getTime())) return bad('That purchase date is not a date.');
+      if (d.getTime() > Date.now() + 86400000) return bad('That purchase date is in the future.');
+      when = d.toISOString();
+    }
+
+    const updated = db.addPurchase(userId, fan.id, amount, String(body?.label || '').trim(), when);
     return ok(decorateFan(updated, db.getConfig(userId)));
   },
 
@@ -489,13 +501,30 @@ export const routes = {
     const snapshot = buildSnapshot(userId);
     const now = new Date();
 
-    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
-    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1).toISOString();
-    const thisMonth = db.revenueBetween(userId, monthStart, now.toISOString());
-    const lastMonth = db.revenueBetween(userId, prevStart, monthStart);
+    const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
+    const prevStart = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+
+    // Like for like. On the 2nd of the month, a full previous month against two
+    // days of this one reads as a catastrophic drop that has not happened, so the
+    // comparison window is only as long as this month has been running.
+    const elapsed = now.getTime() - monthStart.getTime();
+    const prevSoFar = new Date(prevStart.getTime() + elapsed);
+
+    const thisMonth = db.revenueBetween(userId, monthStart.toISOString(), now.toISOString());
+    const lastMonth = db.revenueBetween(userId, prevStart.toISOString(), prevSoFar.toISOString());
+    const lastMonthFull = db.revenueBetween(userId, prevStart.toISOString(), monthStart.toISOString());
 
     const days = db.revenueByDay(userId, 30);
     const last30 = days.reduce((s, d) => s + d.total, 0);
+
+    // 30 days against the 30 before them. Always the same length, whatever the
+    // date, so this is the comparison the screen leads with — a month-to-date
+    // percentage on the 2nd swings wildly off a tiny base and means nothing.
+    const prev30 = db.revenueBetween(
+      userId,
+      new Date(Date.now() - 60 * 86400000).toISOString(),
+      new Date(Date.now() - 30 * 86400000).toISOString()
+    );
 
     return ok({
       currency: snapshot.currency,
@@ -506,10 +535,16 @@ export const routes = {
       revenueByDay: days,
       newFansByDay: db.newFansByDay(userId, 30),
       last30,
+      prev30: prev30.total,
+      // Null rather than 0 when there is nothing to compare against: "+0%" against
+      // an empty period is a made-up number, and she would act on it.
+      delta30: prev30.total > 0
+        ? Math.round(((last30 - prev30.total) / prev30.total) * 100)
+        : null,
       thisMonth: thisMonth.total,
       lastMonth: lastMonth.total,
-      // Null rather than 0 when there is nothing to compare against: "+0%" against
-      // an empty month is a made-up number, and she would act on it.
+      lastMonthFull: lastMonthFull.total,
+      monthDay: now.getDate(),
       monthDelta: lastMonth.total > 0
         ? Math.round(((thisMonth.total - lastMonth.total) / lastMonth.total) * 100)
         : null,

@@ -397,10 +397,12 @@ export function listPurchases(fanId) {
   return db.prepare('SELECT * FROM purchases WHERE fan_id = ? ORDER BY id DESC').all(fanId);
 }
 
-export function addPurchase(userId, fanId, amount, label = '') {
+// `when` lets a sale be logged after the fact — she often catches up a day or two
+// later, and dating those to "now" would pile them onto the wrong day of the chart.
+export function addPurchase(userId, fanId, amount, label = '', when = null) {
   db.prepare(
     'INSERT INTO purchases(fan_id, amount, label, created_at) VALUES(?, ?, ?, ?)'
-  ).run(fanId, amount, label, nowISO());
+  ).run(fanId, amount, label, when || nowISO());
   db.prepare('UPDATE fans SET total_spent = total_spent + ? WHERE id = ?').run(amount, fanId);
   touchFan(fanId);
   return getFan(userId, fanId);
