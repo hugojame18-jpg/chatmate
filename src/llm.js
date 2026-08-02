@@ -252,6 +252,22 @@ export async function transcribeScreenshots({ config, images }) {
   return text;
 }
 
+/** What the readers answer with no provider configured. Carries breakdowns so the
+ *  offline mode exercises the same screen a real import will fill. */
+const DEMO_STATS = {
+  period: 'demo',
+  metrics: { followers: 1234, subscribers: 56, earnings: 789 },
+  breakdowns: {
+    traffic_sources: [
+      { label: 'reddit', value: 48, unit: '%' },
+      { label: 'fansly search', value: 31, unit: '%' },
+      { label: 'direct', value: 21, unit: '%' }
+    ],
+    top_content: [{ label: 'demo post', value: 412, unit: 'views' }],
+    hashtags: [{ label: '#demo', value: 87, unit: 'views' }]
+  }
+};
+
 /**
  * The shape every stats reader returns, whatever it read from. Shared so a
  * screenshot import and a HAR import can never drift into different schemas.
@@ -322,7 +338,7 @@ function normalizeStats(parsed) {
  */
 export async function extractStatsFromHar({ config, blocks }) {
   if (!config.llmProvider || config.llmProvider === 'mock') {
-    return { period: 'demo', metrics: { followers: 1234, subscribers: 56, earnings: 789 }, breakdowns: {} };
+    return DEMO_STATS;
   }
 
   const dump = blocks
@@ -374,7 +390,7 @@ export async function extractStatsFromHar({ config, blocks }) {
  */
 export async function extractStats({ config, images }) {
   if (!config.llmProvider || config.llmProvider === 'mock') {
-    return { period: 'demo', metrics: { followers: 1234, subscribers: 56, earnings: 789 } };
+    return DEMO_STATS;
   }
 
   const visionConfig = {

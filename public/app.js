@@ -1132,33 +1132,41 @@ async function viewManager() {
         Paste her profile link once, then tap ↻ to pull followers, subscribers, likes,
         photos and videos straight from her public page.
       </div>
-      <button class="sm ghost" id="scanStats" style="width:100%">📷 Or import from a screenshot</button>
-      <div id="scanResult"></div>
-
-      <div style="margin-top:14px;padding-top:13px;border-top:1px solid var(--line)">
+      <div style="margin-top:15px;padding-top:14px;border-top:1px solid var(--line)">
         <strong style="font-size:14px">Private stats</strong>
         <div class="tiny" style="margin:5px 0 10px">
-          Earnings, traffic sources, watch time and top fans — the numbers only you can see.
-          You record your own Insights page once, and nothing is ever sent to Fansly.
+          Earnings, traffic sources, watch time, top fans — the numbers only you can see.
+          Screenshot them on your phone and send them here. Nothing is ever sent to Fansly.
         </div>
-        <button class="sm ghost" id="importHar" style="width:100%">📁 Import a recording</button>
-        <button class="chip" id="harHow" style="margin-top:8px">How do I make one?</button>
-        <div id="harHelp" hidden class="tiny" style="margin-top:10px;line-height:1.65">
-          On a <b>computer</b>, in Chrome:
+        <button class="primary" id="scanStats" style="width:100%">📷 Send my stats screenshots</button>
+        <button class="chip" id="shotHow" style="margin-top:8px">Which screens?</button>
+        <div id="shotHelp" hidden class="tiny" style="margin-top:10px;line-height:1.65">
+          In the Fansly app, screenshot these — up to 8 at a time:
           <ol style="margin:7px 0 0;padding-left:18px">
-            <li>Open Fansly and go to your <b>Insights</b> page.</li>
-            <li>Press <b>F12</b>, click the <b>Network</b> tab.</li>
-            <li>Reload the page and wait for all the numbers to appear.</li>
-            <li>Do the same on your <b>Earnings</b> page, in the same tab.</li>
-            <li>Click the <b>⤓ Export HAR</b> icon and save the file.</li>
-            <li>Come back here and import it.</li>
+            <li><b>Insights</b> — the overview with views and engagement.</li>
+            <li><b>Insights</b> again, scrolled down to <b>traffic sources</b>.</li>
+            <li><b>Earnings</b> — the totals and the breakdown.</li>
+            <li><b>Top supporters</b>, if you can see it.</li>
           </ol>
           <div style="margin-top:9px">
-            The file stays on your device — your login is stripped out here before
-            anything is uploaded.
+            Set the period to <b>the same range on every screen</b> (last 30 days works well),
+            and let the numbers finish loading before you screenshot. Blurry or half-loaded
+            figures get skipped rather than guessed.
           </div>
         </div>
-        <div id="harResult"></div>
+        <div id="scanResult"></div>
+
+        <details style="margin-top:12px">
+          <summary class="tiny" style="cursor:pointer">On a computer instead?</summary>
+          <div class="tiny" style="margin:9px 0 0;line-height:1.65">
+            A browser recording imports everything at once, no screenshots.
+            In Chrome: open your <b>Insights</b> page, press <b>F12</b>, click <b>Network</b>,
+            reload, do the same on <b>Earnings</b>, then <b>⤓ Export HAR</b>.
+            Your login is stripped out here before anything is uploaded.
+          </div>
+          <button class="sm ghost" id="importHar" style="width:100%;margin-top:9px">📁 Import a recording</button>
+          <div id="harResult"></div>
+        </details>
       </div>
     </div>
 
@@ -1266,54 +1274,78 @@ async function viewManager() {
     lookup(e.currentTarget, v, 'competitor');
   };
 
-  /* -- Account scan: read the stats screenshots, then let her confirm -- */
+  /* Both stats imports end the same way: show everything that was read, let her
+     check it, and store nothing until she taps save. Shared so the screenshot path
+     shows the breakdowns too — it always extracted them, it just never showed them,
+     which meant saving figures she had no way to verify. */
+  const showStats = (box, res, onSaved) => {
+    const metrics = Object.entries(res.metrics || {});
+    const b = res.breakdowns || {};
+
+    const rows = (title, list) => (list && list.length ? `
+      <div class="tiny" style="margin:12px 0 5px;font-weight:700">${title}</div>
+      ${list.map((r) => `
+        <div class="row between" style="padding:5px 2px">
+          <span class="tiny">${esc(r.label)}</span>
+          <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
+        </div>`).join('')}` : '');
+
+    box.innerHTML = `
+      <div class="alert info" style="margin-top:12px">
+        <strong>Read ${metrics.length} figure${metrics.length === 1 ? '' : 's'}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
+        Check them before saving. If one is wrong, retake that screen.
+      </div>
+      ${metrics.map(([k, v]) => `
+        <div class="row between" style="padding:6px 2px">
+          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
+        </div>`).join('')}
+      ${rows('TRAFFIC SOURCES', b.traffic_sources)}
+      ${rows('TOP CONTENT', b.top_content)}
+      ${rows('HASHTAGS', b.hashtags)}
+      <button class="primary sm" data-save-stats style="width:100%;margin-top:12px">Save this snapshot</button>`;
+
+    box.querySelector('[data-save-stats]').onclick = async () => {
+      await api('/platform', {
+        method: 'POST',
+        body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period || 'private stats' }
+      });
+      toast('📊 Snapshot saved');
+      onSaved();
+    };
+  };
+
+  const showStatsError = (box, err) => {
+    box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+  };
+
+  /* -- Screenshots: her only route, since she works from a phone -- */
+  document.getElementById('shotHow').onclick = (e) => {
+    const help = document.getElementById('shotHelp');
+    help.hidden = !help.hidden;
+    e.currentTarget.textContent = help.hidden ? 'Which screens?' : 'Hide';
+  };
+
   document.getElementById('scanStats').onclick = async (e) => {
     const btn = e.currentTarget;
     const images = await pickScreenshots();
     if (!images.length) return;
 
     const box = document.getElementById('scanResult');
-    btn.disabled = true;
-    btn.textContent = `⏳ Reading ${images.length} screenshot(s)…`;
     box.innerHTML = '';
+    btn.disabled = true;
+    btn.textContent = `⏳ Reading ${images.length} screenshot${images.length === 1 ? '' : 's'}…`;
 
     try {
-      const res = await api('/platform/scan', { method: 'POST', body: { images } });
-      const entries = Object.entries(res.metrics);
-      box.innerHTML = `
-        <div class="alert info" style="margin-top:12px">
-          <strong>Read ${entries.length} number${entries.length > 1 ? 's' : ''}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
-          Check them before saving — if one is wrong, retake the screenshot.
-        </div>
-        ${entries.map(([k, v]) => `
-          <div class="row between" style="padding:6px 2px">
-            <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
-          </div>`).join('')}
-        <button class="primary sm" id="saveScan" style="width:100%;margin-top:10px">Save this snapshot</button>`;
-
-      document.getElementById('saveScan').onclick = async () => {
-        await api('/platform', {
-          method: 'POST',
-          body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period }
-        });
-        toast('📊 Snapshot saved');
-        viewManager();
-      };
+      showStats(box, await api('/platform/scan', { method: 'POST', body: { images } }), viewManager);
     } catch (err) {
-      box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+      showStatsError(box, err);
     } finally {
       btn.disabled = false;
-      btn.textContent = '📷 Or import from a screenshot';
+      btn.textContent = '📷 Send my stats screenshots';
     }
   };
 
   /* -- HAR import: reads a recording her browser already made. No request to Fansly. -- */
-  document.getElementById('harHow').onclick = (e) => {
-    const help = document.getElementById('harHelp');
-    help.hidden = !help.hidden;
-    e.currentTarget.textContent = help.hidden ? 'How do I make one?' : 'Hide the steps';
-  };
-
   document.getElementById('importHar').onclick = async (e) => {
     const btn = e.currentTarget;
     const box = document.getElementById('harResult');
@@ -1333,42 +1365,9 @@ async function viewManager() {
       }
 
       btn.textContent = `⏳ Reading ${picked.blocks.length} response(s)…`;
-      const res = await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } });
-
-      const metrics = Object.entries(res.metrics || {});
-      const rows = (title, list) => (list && list.length ? `
-        <div class="tiny" style="margin:12px 0 5px;font-weight:700">${title}</div>
-        ${list.map((r) => `
-          <div class="row between" style="padding:5px 2px">
-            <span class="tiny">${esc(r.label)}</span>
-            <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
-          </div>`).join('')}` : '');
-
-      const b = res.breakdowns || {};
-      box.innerHTML = `
-        <div class="alert info" style="margin-top:12px">
-          <strong>Read ${metrics.length} figure${metrics.length > 1 ? 's' : ''}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
-          Check them before saving. Nothing is stored until you tap save.
-        </div>
-        ${metrics.map(([k, v]) => `
-          <div class="row between" style="padding:6px 2px">
-            <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
-          </div>`).join('')}
-        ${rows('TRAFFIC SOURCES', b.traffic_sources)}
-        ${rows('TOP CONTENT', b.top_content)}
-        ${rows('HASHTAGS', b.hashtags)}
-        <button class="primary sm" id="saveHar" style="width:100%;margin-top:12px">Save this snapshot</button>`;
-
-      document.getElementById('saveHar').onclick = async () => {
-        await api('/platform', {
-          method: 'POST',
-          body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period || 'private stats' }
-        });
-        toast('📊 Snapshot saved');
-        viewManager();
-      };
+      showStats(box, await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } }), viewManager);
     } catch (err) {
-      box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+      showStatsError(box, err);
     } finally {
       btn.disabled = false;
       btn.textContent = '📁 Import a recording';
