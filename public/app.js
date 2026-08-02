@@ -854,6 +854,284 @@ function renderReply(container, res, fanId, incomingText) {
   };
 }
 
+/* ---------------------- Account data (used by Settings) --------------------- */
+
+/* Her own profile, her private stats and the tracked competitors. This lived on
+   the Manager tab, which pushed the chat below three cards of setup work. It is
+   maintenance she does weekly, so it belongs with the rest of the setup. */
+function accountDataHtml(competitors, config, cur) {
+  return `
+    <div class="card">
+      <h2>My account</h2>
+      <div class="row" style="gap:8px;margin-bottom:9px">
+        <input id="myHandle" class="grow" placeholder="fansly.com/her-username" value="${esc(config.fanslyHandle ? "@" + config.fanslyHandle : "")}" />
+        <button class="primary" id="fetchMine">↻</button>
+      </div>
+      <div class="tiny">
+        Paste her profile link once, then tap ↻ to pull followers, subscribers, likes,
+        photos and videos straight from her public page.
+      </div>
+
+      <div style="margin-top:15px;padding-top:14px;border-top:1px solid var(--line)">
+        <strong style="font-size:14px">Private stats</strong>
+        <div class="tiny" style="margin:5px 0 10px">
+          Earnings, traffic sources, watch time, top fans — the numbers only you can see.
+          Screenshot them on your phone and send them here. Nothing is ever sent to Fansly.
+        </div>
+        <button class="primary" id="scanStats" style="width:100%">📷 Send my stats screenshots</button>
+        <button class="chip" id="shotHow" style="margin-top:8px">Which screens?</button>
+        <div id="shotHelp" hidden class="tiny" style="margin-top:10px;line-height:1.65">
+          In the Fansly app, screenshot these — up to 8 at a time:
+          <ol style="margin:7px 0 0;padding-left:18px">
+            <li><b>Insights</b> — the overview with views and engagement.</li>
+            <li><b>Insights</b> again, scrolled down to <b>traffic sources</b>.</li>
+            <li><b>Earnings</b> — the totals and the breakdown.</li>
+            <li><b>Top supporters</b>, if you can see it.</li>
+          </ol>
+          <div style="margin-top:9px">
+            Set the period to <b>the same range on every screen</b> (last 30 days works well),
+            and let the numbers finish loading before you screenshot. Blurry or half-loaded
+            figures get skipped rather than guessed.
+          </div>
+        </div>
+        <div id="scanResult"></div>
+
+        <details style="margin-top:12px">
+          <summary class="tiny" style="cursor:pointer">On a computer instead?</summary>
+          <div class="tiny" style="margin:9px 0 0;line-height:1.65">
+            A browser recording imports everything at once, no screenshots.
+            In Chrome: open your <b>Insights</b> page, press <b>F12</b>, click <b>Network</b>,
+            reload, do the same on <b>Earnings</b>, then <b>⤓ Export HAR</b>.
+            Your login is stripped out here before anything is uploaded.
+          </div>
+          <button class="sm ghost" id="importHar" style="width:100%;margin-top:9px">📁 Import a recording</button>
+          <div id="harResult"></div>
+        </details>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Competitors</h2>
+      <div class="tiny" style="margin-bottom:11px">
+        The manager is only allowed to name creators listed here. Find them in Fansly search,
+        screenshot the profile, import it — then the numbers are real.
+      </div>
+      ${competitors.map((c) => `
+        <div class="row between" style="padding:9px 0;border-bottom:1px solid var(--line)">
+          <div class="grow">
+            <strong>${esc(c.handle || c.display_name)}</strong>
+            <div class="tiny">
+              ${[c.followers != null ? `${c.followers.toLocaleString()} followers` : null,
+                 c.subscribers != null ? `${c.subscribers.toLocaleString()} subs` : null,
+                 c.price != null ? `${money(c.price, cur)}/mo` : null,
+                 c.themes || null].filter(Boolean).join(" · ") || "no figures read"}
+            </div>
+          </div>
+          <button class="sm danger" data-delcomp="${c.id}">✕</button>
+        </div>`).join("")}
+      <div class="row" style="gap:8px;margin:12px 0 8px">
+        <input id="compLink" class="grow" placeholder="Paste a competitor profile link" />
+        <button class="primary" id="fetchComp">+</button>
+      </div>
+      <button class="sm ghost" id="scanProfile" style="width:100%">📷 Or import from a screenshot</button>
+      <div id="profileResult"></div>
+    </div>`;
+}
+
+/** Wires everything accountDataHtml renders. `refresh` re-renders the host view. */
+function bindAccountData(refresh) {
+  /* -- One-tap refresh straight from her public Fansly page -- */
+  const lookup = async (btn, input, save, notes) => {
+    const label = btn.textContent;
+    btn.disabled = true;
+    btn.textContent = '⏳';
+    try {
+      const res = await api('/fansly/lookup', { method: 'POST', body: { input, save, notes } });
+      toast(`✅ ${res.display_name || res.handle} — ${res.metrics.followers.toLocaleString()} followers`);
+      refresh();
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.textContent = label;
+    }
+  };
+
+  document.getElementById('fetchMine').onclick = (e) => {
+    const v = document.getElementById('myHandle').value.trim();
+    if (!v) return toast('Paste her profile link first');
+    lookup(e.currentTarget, v, 'me');
+  };
+
+  document.getElementById('fetchComp').onclick = (e) => {
+    const v = document.getElementById('compLink').value.trim();
+    if (!v) return toast('Paste a profile link first');
+    lookup(e.currentTarget, v, 'competitor');
+  };
+
+  /* Both stats imports end the same way: show everything that was read, let her
+     check it, and store nothing until she taps save. Shared so the screenshot path
+     shows the breakdowns too — it always extracted them, it just never showed them,
+     which meant saving figures she had no way to verify. */
+  const showStats = (box, res, onSaved) => {
+    const metrics = Object.entries(res.metrics || {});
+    const b = res.breakdowns || {};
+
+    const rows = (title, list) => (list && list.length ? `
+      <div class="tiny" style="margin:12px 0 5px;font-weight:700">${title}</div>
+      ${list.map((r) => `
+        <div class="row between" style="padding:5px 2px">
+          <span class="tiny">${esc(r.label)}</span>
+          <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
+        </div>`).join('')}` : '');
+
+    box.innerHTML = `
+      <div class="alert info" style="margin-top:12px">
+        <strong>Read ${metrics.length} figure${metrics.length === 1 ? '' : 's'}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
+        Check them before saving. If one is wrong, retake that screen.
+      </div>
+      ${metrics.map(([k, v]) => `
+        <div class="row between" style="padding:6px 2px">
+          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
+        </div>`).join('')}
+      ${rows('TRAFFIC SOURCES', b.traffic_sources)}
+      ${rows('TOP CONTENT', b.top_content)}
+      ${rows('HASHTAGS', b.hashtags)}
+      <button class="primary sm" data-save-stats style="width:100%;margin-top:12px">Save this snapshot</button>`;
+
+    box.querySelector('[data-save-stats]').onclick = async () => {
+      await api('/platform', {
+        method: 'POST',
+        body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period || 'private stats' }
+      });
+      toast('📊 Snapshot saved');
+      onSaved();
+    };
+  };
+
+  const showStatsError = (box, err) => {
+    box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+  };
+
+  /* -- Screenshots: her only route, since she works from a phone -- */
+  document.getElementById('shotHow').onclick = (e) => {
+    const help = document.getElementById('shotHelp');
+    help.hidden = !help.hidden;
+    e.currentTarget.textContent = help.hidden ? 'Which screens?' : 'Hide';
+  };
+
+  document.getElementById('scanStats').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const images = await pickScreenshots();
+    if (!images.length) return;
+
+    const box = document.getElementById('scanResult');
+    box.innerHTML = '';
+    btn.disabled = true;
+    btn.textContent = `⏳ Reading ${images.length} screenshot${images.length === 1 ? '' : 's'}…`;
+
+    try {
+      showStats(box, await api('/platform/scan', { method: 'POST', body: { images } }), viewManager);
+    } catch (err) {
+      showStatsError(box, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📷 Send my stats screenshots';
+    }
+  };
+
+  /* -- HAR import: reads a recording her browser already made. No request to Fansly. -- */
+  document.getElementById('importHar').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const box = document.getElementById('harResult');
+    box.innerHTML = '';
+
+    btn.disabled = true;
+    btn.textContent = '⏳ Reading the file…';
+
+    try {
+      const picked = await pickHar();
+      if (!picked) return;
+      if (picked.error) throw new Error(picked.error);
+      if (!picked.blocks.length) {
+        throw Object.assign(new Error('No Fansly data in that recording.'), {
+          hint: 'The Network tab has to be recording while the Insights page loads its numbers.'
+        });
+      }
+
+      btn.textContent = `⏳ Reading ${picked.blocks.length} response(s)…`;
+      showStats(box, await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } }), viewManager);
+    } catch (err) {
+      showStatsError(box, err);
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📁 Import a recording';
+    }
+  };
+
+  /* -- Competitor profiles, read off her own screenshots -- */
+  view.querySelectorAll('[data-delcomp]').forEach((btn) => {
+    btn.onclick = async () => {
+      await api(`/competitors/${btn.dataset.delcomp}`, { method: 'DELETE' });
+      refresh();
+    };
+  });
+
+  document.getElementById('scanProfile').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const images = await pickScreenshots();
+    if (!images.length) return;
+
+    const box = document.getElementById('profileResult');
+    btn.disabled = true;
+    btn.textContent = '⏳ Reading the profile…';
+    box.innerHTML = '';
+
+    try {
+      const p = await api('/competitors/scan', { method: 'POST', body: { images } });
+      box.innerHTML = `
+        <div class="alert info" style="margin-top:12px">
+          <strong>Check what was read</strong>
+          Anything left empty was not legible — leave it empty rather than guessing.
+        </div>
+        <div class="stack">
+          <div><label>Handle</label><input id="cpHandle" value="${esc(p.handle || '')}" /></div>
+          <div class="row" style="gap:8px">
+            <div class="grow"><label>Followers</label><input id="cpFollowers" type="number" value="${p.followers ?? ''}" /></div>
+            <div class="grow"><label>Subs</label><input id="cpSubs" type="number" value="${p.subscribers ?? ''}" /></div>
+            <div class="grow"><label>Price</label><input id="cpPrice" type="number" value="${p.price ?? ''}" /></div>
+          </div>
+          <div><label>Themes</label><input id="cpThemes" value="${esc(p.themes || '')}" /></div>
+          <div><label>Your notes — what does she do well?</label><textarea id="cpNotes" style="min-height:60px"></textarea></div>
+          <button class="primary sm" id="saveComp">Add this competitor</button>
+        </div>`;
+
+      document.getElementById('saveComp').onclick = async () => {
+        await api('/competitors', {
+          method: 'POST',
+          body: {
+            handle: document.getElementById('cpHandle').value,
+            display_name: p.display_name || '',
+            followers: document.getElementById('cpFollowers').value || null,
+            subscribers: document.getElementById('cpSubs').value || null,
+            price: document.getElementById('cpPrice').value || null,
+            bio: p.bio || '',
+            themes: document.getElementById('cpThemes').value,
+            notes: document.getElementById('cpNotes').value
+          }
+        });
+        toast('Competitor added');
+        refresh();
+      };
+    } catch (err) {
+      box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = '📷 Import a competitor profile';
+    }
+  };
+}
+
+
 /* ------------------------------ View: Manager ------------------------------ */
 
 // Minimal markdown for the manager's answers. Escaped first, so nothing the model
@@ -1040,13 +1318,16 @@ function breakdownBlocks(breakdowns) {
   ].join('');
 }
 
+/** Which of the three Manager panes is open. Survives a re-render. */
+let managerPane = 'chat';
+
 async function viewManager() {
   setHeader('Manager');
   setTab('manager');
   view.innerHTML = '<div class="loading">Loading…</div>';
 
-  const [{ messages, snapshot }, stats, platform, strategies, competitors] = await Promise.all([
-    api('/manager'), api('/stats'), api('/platform'), api('/strategy'), api('/competitors')
+  const [{ messages, snapshot }, stats, platform, strategies] = await Promise.all([
+    api('/manager'), api('/stats'), api('/platform'), api('/strategy')
   ]);
   const cur = snapshot.currency;
   const t = snapshot.totals;
@@ -1099,7 +1380,42 @@ async function viewManager() {
         Once there is enough, you will see which push level, character and item actually sell.
       </div>`;
 
-  view.innerHTML = `
+  /* Chat first, and the composer at the top of it. Everything used to live on one
+     page with the chat underneath, so asking a question meant scrolling past every
+     card on the screen. */
+  const chatPane = `
+    <div class="card composer">
+      <textarea id="mgrInput" placeholder="Ask about content, pricing, growth — anything." style="min-height:62px"></textarea>
+      <div class="row" style="gap:8px;margin-top:9px">
+        <button class="primary grow" id="mgrSend">Ask</button>
+        ${messages.length ? '<button class="sm danger" id="mgrClear">Clear</button>' : ''}
+      </div>
+      <select id="mgrPreset" style="margin-top:9px">
+        <option value="">💡 Or pick a ready-made question…</option>
+        ${MANAGER_PROMPTS.map(([group, qs]) => `
+          <optgroup label="${esc(group)}">
+            ${qs.map((q) => `<option value="${esc(q)}">${esc(q)}</option>`).join('')}
+          </optgroup>`).join('')}
+      </select>
+      <div class="tiny" style="margin-top:9px">
+        ${config.managerWebSearch
+          ? '🌐 Web search is on — it can look up your niche and other creators.'
+          : '🔒 No web access. Turn it on in Settings for research questions.'}
+      </div>
+    </div>
+
+    <div id="mgrThread">
+      ${messages.length ? messages.map((m) => `
+        <div class="mgr ${m.role}">${m.role === 'assistant' ? mini_md(m.content) : esc(m.content)}</div>
+      `).join('') : `
+        <div class="empty" style="padding:30px 10px">
+          <span class="big-emoji">📈</span>
+          Ask anything about your account.<br>
+          <span class="tiny">It reads your real numbers, not generic Fansly advice.</span>
+        </div>`}
+    </div>`;
+
+  const statsPane = `
     <div class="hero">
       <div class="greet">Your account, in numbers</div>
       <div class="headline"><em>${money(t.revenue, cur)}</em> earned so far</div>
@@ -1115,326 +1431,50 @@ async function viewManager() {
     ${perf}
 
     <div class="card">
-      <h2>Account scan</h2>
-      ${platform.length ? `
-        <div style="margin-bottom:12px">
-          ${platformTrend(platform)}
-        </div>` : `
-        <div class="tiny" style="margin-bottom:12px">
-          Screenshot your Fansly stats or earnings page and import it. Do it every week and
-          the manager can talk about direction, not just today's figure.
+      <h2>From Fansly</h2>
+      ${platform.length ? platformTrend(platform) : `
+        <div class="tiny">
+          Nothing imported yet. Send your Fansly stats screenshots from
+          <b>Settings → My account</b> and they show up here.
         </div>`}
-      <div class="row" style="gap:8px;margin-bottom:9px">
-        <input id="myHandle" class="grow" placeholder="fansly.com/her-username" value="${esc(config.fanslyHandle ? '@' + config.fanslyHandle : '')}" />
-        <button class="primary" id="fetchMine">↻</button>
-      </div>
-      <div class="tiny" style="margin-bottom:11px">
-        Paste her profile link once, then tap ↻ to pull followers, subscribers, likes,
-        photos and videos straight from her public page.
-      </div>
-      <div style="margin-top:15px;padding-top:14px;border-top:1px solid var(--line)">
-        <strong style="font-size:14px">Private stats</strong>
-        <div class="tiny" style="margin:5px 0 10px">
-          Earnings, traffic sources, watch time, top fans — the numbers only you can see.
-          Screenshot them on your phone and send them here. Nothing is ever sent to Fansly.
-        </div>
-        <button class="primary" id="scanStats" style="width:100%">📷 Send my stats screenshots</button>
-        <button class="chip" id="shotHow" style="margin-top:8px">Which screens?</button>
-        <div id="shotHelp" hidden class="tiny" style="margin-top:10px;line-height:1.65">
-          In the Fansly app, screenshot these — up to 8 at a time:
-          <ol style="margin:7px 0 0;padding-left:18px">
-            <li><b>Insights</b> — the overview with views and engagement.</li>
-            <li><b>Insights</b> again, scrolled down to <b>traffic sources</b>.</li>
-            <li><b>Earnings</b> — the totals and the breakdown.</li>
-            <li><b>Top supporters</b>, if you can see it.</li>
-          </ol>
-          <div style="margin-top:9px">
-            Set the period to <b>the same range on every screen</b> (last 30 days works well),
-            and let the numbers finish loading before you screenshot. Blurry or half-loaded
-            figures get skipped rather than guessed.
-          </div>
-        </div>
-        <div id="scanResult"></div>
+    </div>`;
 
-        <details style="margin-top:12px">
-          <summary class="tiny" style="cursor:pointer">On a computer instead?</summary>
-          <div class="tiny" style="margin:9px 0 0;line-height:1.65">
-            A browser recording imports everything at once, no screenshots.
-            In Chrome: open your <b>Insights</b> page, press <b>F12</b>, click <b>Network</b>,
-            reload, do the same on <b>Earnings</b>, then <b>⤓ Export HAR</b>.
-            Your login is stripped out here before anything is uploaded.
-          </div>
-          <button class="sm ghost" id="importHar" style="width:100%;margin-top:9px">📁 Import a recording</button>
-          <div id="harResult"></div>
-        </details>
-      </div>
-    </div>
-
-    <div class="card">
-      <h2>Competitors</h2>
-      <div class="tiny" style="margin-bottom:11px">
-        The manager is only allowed to name creators listed here. Find them in Fansly search,
-        screenshot the profile, import it — then the numbers are real.
-      </div>
-      ${competitors.map((c) => `
-        <div class="row between" style="padding:9px 0;border-bottom:1px solid var(--line)">
-          <div class="grow">
-            <strong>${esc(c.handle || c.display_name)}</strong>
-            <div class="tiny">
-              ${[c.followers != null ? `${c.followers.toLocaleString()} followers` : null,
-                 c.subscribers != null ? `${c.subscribers.toLocaleString()} subs` : null,
-                 c.price != null ? `${money(c.price, cur)}/mo` : null,
-                 c.themes || null].filter(Boolean).join(' · ') || 'no figures read'}
-            </div>
-          </div>
-          <button class="sm danger" data-delcomp="${c.id}">✕</button>
-        </div>`).join('')}
-      <div class="row" style="gap:8px;margin:12px 0 8px">
-        <input id="compLink" class="grow" placeholder="Paste a competitor's profile link" />
-        <button class="primary" id="fetchComp">+</button>
-      </div>
-      <button class="sm ghost" id="scanProfile" style="width:100%">📷 Or import from a screenshot</button>
-      <div id="profileResult"></div>
-    </div>
-
+  const planPane = `
     <div class="card">
       <h2>Scaling strategy</h2>
       <div class="tiny" style="margin-bottom:11px">
         A full written plan: bottleneck, content, pricing, growth, retention, and a
-        week-by-week month. Uses everything above${config.managerWebSearch ? ' plus live research' : ''}.
+        week-by-week month. Uses everything the app knows${config.managerWebSearch ? ' plus live research' : ''}.
       </div>
       <input id="stratFocus" placeholder="Anything to focus on? (optional)" style="margin-bottom:9px" />
       <button class="primary" id="genStrategy" style="width:100%">📋 Write my scaling plan</button>
       ${strategies.length ? `
-        <div class="tiny" style="margin:12px 0 7px;font-weight:700">SAVED PLANS</div>
-        ${strategies.map((s) => `
-          <button class="chip" data-strategy="${s.id}" style="margin:0 6px 6px 0">${esc(s.title)}</button>`).join('')}` : ''}
-    </div>
-
-    <div id="strategyOut"></div>
-
-    <div id="mgrThread">
-      ${messages.length ? messages.map((m) => `
-        <div class="mgr ${m.role}">${m.role === 'assistant' ? mini_md(m.content) : esc(m.content)}</div>
-      `).join('') : `
-        <div class="empty" style="padding:26px 10px">
-          <span class="big-emoji">📈</span>
-          Ask anything about your account.<br>
-          <span class="tiny">It reads your real numbers, not generic Fansly advice.</span>
-        </div>`}
-    </div>
-
-    ${messages.length ? '' : MANAGER_PROMPTS.map(([group, qs]) => `
-      <div style="margin-bottom:14px">
-        <div class="tiny" style="font-weight:700;margin-bottom:8px">${group}</div>
+        <div class="tiny" style="margin:14px 0 7px;font-weight:700">SAVED PLANS</div>
         <div class="chips">
-          ${qs.map((q) => `<button class="chip" data-ask="${esc(q)}">${esc(q)}</button>`).join('')}
-        </div>
-      </div>`).join('')}
-
-    <div class="card">
-      <textarea id="mgrInput" placeholder="Ask about content, marketing, pricing, anything…" style="min-height:70px"></textarea>
-      <div class="row" style="gap:8px;margin-top:9px">
-        <button class="primary grow" id="mgrSend">Ask</button>
-        ${messages.length ? '<button class="sm danger" id="mgrClear">Clear</button>' : ''}
-      </div>
-      <div class="tiny" style="margin-top:9px">
-        ${config.managerWebSearch
-          ? '🌐 Web search is on — it can look up your niche and other creators.'
-          : '🔒 No web access. Turn on web search in Settings for research questions.'}
-      </div>
+          ${strategies.map((s) => `<button class="chip" data-strategy="${s.id}">${esc(s.title)}</button>`).join('')}
+        </div>` : ''}
     </div>
+
+    <div id="strategyOut"></div>`;
+
+  view.innerHTML = `
+    <div class="segmented">
+      ${[['chat', '💬 Chat'], ['stats', '📊 Stats'], ['plan', '🚀 Plan']]
+        .map(([k, label]) => `<button data-pane="${k}" class="${managerPane === k ? 'on' : ''}">${label}</button>`)
+        .join('')}
+    </div>
+    ${managerPane === 'stats' ? statsPane : managerPane === 'plan' ? planPane : chatPane}
   `;
 
-  /* -- One-tap refresh straight from her public Fansly page -- */
-  const lookup = async (btn, input, save, notes) => {
-    const label = btn.textContent;
-    btn.disabled = true;
-    btn.textContent = '⏳';
-    try {
-      const res = await api('/fansly/lookup', { method: 'POST', body: { input, save, notes } });
-      toast(`✅ ${res.display_name || res.handle} — ${res.metrics.followers.toLocaleString()} followers`);
-      viewManager();
-    } catch (err) {
-      toast(err.message);
-      btn.disabled = false;
-      btn.textContent = label;
-    }
-  };
-
-  document.getElementById('fetchMine').onclick = (e) => {
-    const v = document.getElementById('myHandle').value.trim();
-    if (!v) return toast('Paste her profile link first');
-    lookup(e.currentTarget, v, 'me');
-  };
-
-  document.getElementById('fetchComp').onclick = (e) => {
-    const v = document.getElementById('compLink').value.trim();
-    if (!v) return toast('Paste a profile link first');
-    lookup(e.currentTarget, v, 'competitor');
-  };
-
-  /* Both stats imports end the same way: show everything that was read, let her
-     check it, and store nothing until she taps save. Shared so the screenshot path
-     shows the breakdowns too — it always extracted them, it just never showed them,
-     which meant saving figures she had no way to verify. */
-  const showStats = (box, res, onSaved) => {
-    const metrics = Object.entries(res.metrics || {});
-    const b = res.breakdowns || {};
-
-    const rows = (title, list) => (list && list.length ? `
-      <div class="tiny" style="margin:12px 0 5px;font-weight:700">${title}</div>
-      ${list.map((r) => `
-        <div class="row between" style="padding:5px 2px">
-          <span class="tiny">${esc(r.label)}</span>
-          <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
-        </div>`).join('')}` : '');
-
-    box.innerHTML = `
-      <div class="alert info" style="margin-top:12px">
-        <strong>Read ${metrics.length} figure${metrics.length === 1 ? '' : 's'}${res.period ? ` · ${esc(res.period)}` : ''}</strong>
-        Check them before saving. If one is wrong, retake that screen.
-      </div>
-      ${metrics.map(([k, v]) => `
-        <div class="row between" style="padding:6px 2px">
-          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
-        </div>`).join('')}
-      ${rows('TRAFFIC SOURCES', b.traffic_sources)}
-      ${rows('TOP CONTENT', b.top_content)}
-      ${rows('HASHTAGS', b.hashtags)}
-      <button class="primary sm" data-save-stats style="width:100%;margin-top:12px">Save this snapshot</button>`;
-
-    box.querySelector('[data-save-stats]').onclick = async () => {
-      await api('/platform', {
-        method: 'POST',
-        body: { metrics: res.metrics, breakdowns: res.breakdowns, label: res.period || 'private stats' }
-      });
-      toast('📊 Snapshot saved');
-      onSaved();
-    };
-  };
-
-  const showStatsError = (box, err) => {
-    box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
-  };
-
-  /* -- Screenshots: her only route, since she works from a phone -- */
-  document.getElementById('shotHow').onclick = (e) => {
-    const help = document.getElementById('shotHelp');
-    help.hidden = !help.hidden;
-    e.currentTarget.textContent = help.hidden ? 'Which screens?' : 'Hide';
-  };
-
-  document.getElementById('scanStats').onclick = async (e) => {
-    const btn = e.currentTarget;
-    const images = await pickScreenshots();
-    if (!images.length) return;
-
-    const box = document.getElementById('scanResult');
-    box.innerHTML = '';
-    btn.disabled = true;
-    btn.textContent = `⏳ Reading ${images.length} screenshot${images.length === 1 ? '' : 's'}…`;
-
-    try {
-      showStats(box, await api('/platform/scan', { method: 'POST', body: { images } }), viewManager);
-    } catch (err) {
-      showStatsError(box, err);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '📷 Send my stats screenshots';
-    }
-  };
-
-  /* -- HAR import: reads a recording her browser already made. No request to Fansly. -- */
-  document.getElementById('importHar').onclick = async (e) => {
-    const btn = e.currentTarget;
-    const box = document.getElementById('harResult');
-    box.innerHTML = '';
-
-    btn.disabled = true;
-    btn.textContent = '⏳ Reading the file…';
-
-    try {
-      const picked = await pickHar();
-      if (!picked) return;
-      if (picked.error) throw new Error(picked.error);
-      if (!picked.blocks.length) {
-        throw Object.assign(new Error('No Fansly data in that recording.'), {
-          hint: 'The Network tab has to be recording while the Insights page loads its numbers.'
-        });
-      }
-
-      btn.textContent = `⏳ Reading ${picked.blocks.length} response(s)…`;
-      showStats(box, await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } }), viewManager);
-    } catch (err) {
-      showStatsError(box, err);
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '📁 Import a recording';
-    }
-  };
-
-  /* -- Competitor profiles, read off her own screenshots -- */
-  view.querySelectorAll('[data-delcomp]').forEach((btn) => {
-    btn.onclick = async () => {
-      await api(`/competitors/${btn.dataset.delcomp}`, { method: 'DELETE' });
+  view.querySelectorAll('[data-pane]').forEach((btn) => {
+    btn.onclick = () => {
+      managerPane = btn.dataset.pane;
       viewManager();
     };
   });
 
-  document.getElementById('scanProfile').onclick = async (e) => {
-    const btn = e.currentTarget;
-    const images = await pickScreenshots();
-    if (!images.length) return;
-
-    const box = document.getElementById('profileResult');
-    btn.disabled = true;
-    btn.textContent = '⏳ Reading the profile…';
-    box.innerHTML = '';
-
-    try {
-      const p = await api('/competitors/scan', { method: 'POST', body: { images } });
-      box.innerHTML = `
-        <div class="alert info" style="margin-top:12px">
-          <strong>Check what was read</strong>
-          Anything left empty was not legible — leave it empty rather than guessing.
-        </div>
-        <div class="stack">
-          <div><label>Handle</label><input id="cpHandle" value="${esc(p.handle || '')}" /></div>
-          <div class="row" style="gap:8px">
-            <div class="grow"><label>Followers</label><input id="cpFollowers" type="number" value="${p.followers ?? ''}" /></div>
-            <div class="grow"><label>Subs</label><input id="cpSubs" type="number" value="${p.subscribers ?? ''}" /></div>
-            <div class="grow"><label>Price</label><input id="cpPrice" type="number" value="${p.price ?? ''}" /></div>
-          </div>
-          <div><label>Themes</label><input id="cpThemes" value="${esc(p.themes || '')}" /></div>
-          <div><label>Your notes — what does she do well?</label><textarea id="cpNotes" style="min-height:60px"></textarea></div>
-          <button class="primary sm" id="saveComp">Add this competitor</button>
-        </div>`;
-
-      document.getElementById('saveComp').onclick = async () => {
-        await api('/competitors', {
-          method: 'POST',
-          body: {
-            handle: document.getElementById('cpHandle').value,
-            display_name: p.display_name || '',
-            followers: document.getElementById('cpFollowers').value || null,
-            subscribers: document.getElementById('cpSubs').value || null,
-            price: document.getElementById('cpPrice').value || null,
-            bio: p.bio || '',
-            themes: document.getElementById('cpThemes').value,
-            notes: document.getElementById('cpNotes').value
-          }
-        });
-        toast('Competitor added');
-        viewManager();
-      };
-    } catch (err) {
-      box.innerHTML = `<div class="alert block" style="margin-top:12px"><strong>${esc(err.message)}</strong>${esc(err.hint || '')}</div>`;
-    } finally {
-      btn.disabled = false;
-      btn.textContent = '📷 Import a competitor profile';
-    }
-  };
+  /* Only one pane is in the DOM at a time, so each block below checks that the
+     element it drives is actually on screen. */
 
   /* -- The written plan -- */
   const showStrategy = (s) => {
@@ -1459,7 +1499,8 @@ async function viewManager() {
     };
   };
 
-  document.getElementById('genStrategy').onclick = async (e) => {
+  const genBtn = document.getElementById('genStrategy');
+  if (genBtn) genBtn.onclick = async (e) => {
     const btn = e.currentTarget;
     btn.disabled = true;
     btn.textContent = '⏳ Writing your plan… (up to a minute)';
@@ -1483,9 +1524,11 @@ async function viewManager() {
     btn.onclick = async () => showStrategy(await api(`/strategy/${btn.dataset.strategy}`));
   });
 
+  /* -- The chat -- */
   const input = document.getElementById('mgrInput');
   const thread = document.getElementById('mgrThread');
   const sendBtn = document.getElementById('mgrSend');
+  if (!input) return;
 
   const ask = async (question) => {
     const q = (question || input.value).trim();
@@ -1510,9 +1553,16 @@ async function viewManager() {
   };
 
   sendBtn.onclick = () => ask();
-  view.querySelectorAll('[data-ask]').forEach((btn) => {
-    btn.onclick = () => ask(btn.dataset.ask);
-  });
+
+  /* The ready-made questions used to be four groups of chips stacked down the
+     page. As a dropdown they cost one line. Picking one fills the box rather
+     than sending, so she can reword it first. */
+  document.getElementById('mgrPreset').onchange = (e) => {
+    if (!e.target.value) return;
+    input.value = e.target.value;
+    e.target.selectedIndex = 0;
+    input.focus();
+  };
 
   const clearBtn = document.getElementById('mgrClear');
   if (clearBtn) clearBtn.onclick = async () => {
@@ -1586,9 +1636,13 @@ async function viewMedia() {
 async function viewReglages() {
   setHeader('Settings');
   setTab('reglages');
-  const cfg = await api('/config');
+  view.innerHTML = '<div class="loading">Loading…</div>';
+
+  const [cfg, competitors] = await Promise.all([api('/config'), api('/competitors')]);
 
   view.innerHTML = `
+    ${accountDataHtml(competitors, cfg, cfg.currency)}
+
     <div class="card stack">
       <h2>Her voice</h2>
       <div><label>Stage name</label><input id="cName" value="${esc(cfg.personaName)}" /></div>
@@ -1717,6 +1771,8 @@ async function viewReglages() {
       Everything goes through manual copy and paste.
     </div>
   `;
+
+  bindAccountData(viewReglages);
 
   document.getElementById('saveCfg').onclick = async () => {
     const body = {
