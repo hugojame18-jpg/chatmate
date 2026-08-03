@@ -267,6 +267,26 @@ function money(n, cur = 'USD') {
   return cur === 'USD' || cur === 'GBP' ? `${sym}${amount}` : `${amount}${sym}`;
 }
 
+/* The metrics that come out of a screenshot, a HAR import or manual entry are a
+   freeform {snake_case_label: number} bag — there is no fixed schema, because the
+   stats pages she screenshots differ. Without a unit a number like "avg_watch_time:
+   96" or "engagement_rate: 7.4" is unreadable, so the key name itself is used to
+   infer what it means: this runs the same way everywhere a metric is displayed, so
+   the same key always reads the same way. */
+function fmtMetric(key, value) {
+  if (typeof value !== 'number') return esc(String(value));
+  if (/(time|duration)/i.test(key) && value >= 60) {
+    return `${Math.floor(value / 60)}m ${String(Math.round(value % 60)).padStart(2, '0')}s`;
+  }
+  if (/(rate|percent|share|ratio|ctr)\b/i.test(key)) return `${value}%`;
+  if (/(earning|revenue|income|payout|wallet|spend|price|tip)/i.test(key)) return money(value, currentCur());
+  return value.toLocaleString('en-US');
+}
+
+/* fmtMetric needs a currency and is called from places that do not each thread one
+   through — the config object is already the single source of truth for it. */
+function currentCur() { return config.currency || 'USD'; }
+
 function ago(days) {
   if (days === null || days === undefined) return '';
   if (days === 0) return 'today';
@@ -533,18 +553,11 @@ function setTab(name) {
 
 /* ------------------------------- View: Fans -------------------------------- */
 
-async function viewFans() {
-  setHeader('Fans');
-  setTab('fans');
-  view.innerHTML = '<div class="loading">Loading…</div>';
+/** Which sub-view of the Fans tab is open. Survives a re-render. */
+let fansPane = 'all';
 
-  const [fans, dash] = await Promise.all([api('/fans'), api('/dashboard')]);
-  const cur = config.currency;
-
-  const waiting = fans.filter((f) => f.waiting_reply && !f.blocked);
-  const others = fans.filter((f) => !f.waiting_reply || f.blocked);
-
-  const item = (f) => `
+function fanItemHtml(f, cur) {
+  return `
     <a class="fan-item ${f.waiting_reply && !f.blocked ? 'waiting' : ''}" href="#/fan/${f.id}">
       <div class="avatar" style="${avatarStyle(f.handle)}">${esc(initials(f.display_name || f.handle))}</div>
       <div class="grow">
@@ -555,7 +568,7 @@ async function viewFans() {
           <span class="tiny">${money(f.total_spent, cur)}</span>
         </div>
         <div class="tiny truncate" style="margin-bottom:5px">
-          ${f.blocked ? '🚫 blocked · ' : ''}${esc(f.last_message || 'no messages yet')}
+          ${f.blocked ? '🚫 blocked · ' : ''}${esc(f.last_message || (f.silent_days != null ? `silent ${f.silent_days}d` : 'no messages yet'))}
         </div>
         <div class="row" style="gap:8px">
           ${journey(f.stage_label)}
@@ -564,6 +577,18 @@ async function viewFans() {
       </div>
       ${f.waiting_reply && !f.blocked ? '<span class="dot"></span>' : ''}
     </a>`;
+}
+
+async function viewFans() {
+  setHeader('Fans');
+  setTab('fans');
+  view.innerHTML = '<div class="loading">Loading…</div>';
+
+  const [fans, dash, followups] = await Promise.all([api('/fans'), api('/dashboard'), api('/followups')]);
+  const cur = config.currency;
+
+  const waiting = fans.filter((f) => f.waiting_reply && !f.blocked);
+  const others = fans.filter((f) => !f.waiting_reply || f.blocked);
 
   // One sentence telling her what to do, instead of four numbers to interpret.
   const headline = !fans.length
@@ -575,29 +600,51 @@ async function viewFans() {
   const hour = new Date().getHours();
   const greet = hour < 6 ? 'Late night' : hour < 12 ? 'Morning' : hour < 18 ? 'Afternoon' : 'Evening';
 
-  view.innerHTML = `
-    <div class="hero">
-      <div class="greet">${greet}</div>
-      <div class="headline">${headline}</div>
-    </div>
-
-    ${waiting.length ? waiting.map(item).join('') : ''}
+  const allPane = `
+    ${waiting.length ? waiting.map((f) => fanItemHtml(f, cur)).join('') : ''}
 
     ${others.length ? `
       <div class="row between" style="margin:22px 0 11px">
         <span class="tiny" style="font-weight:700;letter-spacing:.5px">EVERYONE ELSE</span>
-        <span class="tiny">${money(dash.revenue, cur)} · ${dash.whales} whale${dash.whales === 1 ? '' : 's'}</span>
+        <span class="tiny">${money(dash.totals.revenue, cur)} · ${fans.filter((f) => f.stage === 'whale').length} whale${fans.filter((f) => f.stage === 'whale').length === 1 ? '' : 's'}</span>
       </div>
-      ${others.map(item).join('')}` : ''}
+      ${others.map((f) => fanItemHtml(f, cur)).join('')}` : ''}
 
     ${!fans.length ? `
       <div class="empty">
         <span class="big-emoji">💬</span>
         No fans yet.<br>Add one below and paste his first message.
-      </div>` : ''}
+      </div>` : ''}`;
+
+  const followPane = `
+    <div class="tiny" style="margin-bottom:14px">Quiet for ${config.silentDays}+ days · biggest spenders first</div>
+    ${followups.relances.length ? followups.relances.map((f) => fanItemHtml(f, cur)).join('') : `
+      <div class="empty">
+        <span class="big-emoji">🎉</span>
+        Everyone has heard from you recently.
+      </div>`}`;
+
+  view.innerHTML = `
+    <div class="hero">
+      <div class="greet">${greet}</div>
+      <div class="headline">${fansPane === 'all' ? headline : followups.relances.length
+        ? `<em>${followups.relances.length}</em> worth waking up`
+        : 'Nobody to chase 👌'}</div>
+    </div>
+
+    <div class="segmented">
+      <button data-fanspane="all" class="${fansPane === 'all' ? 'on' : ''}">👥 All fans</button>
+      <button data-fanspane="follow" class="${fansPane === 'follow' ? 'on' : ''}">🔔 Follow-ups${followups.relances.length ? ` (${followups.relances.length})` : ''}</button>
+    </div>
+
+    ${fansPane === 'all' ? allPane : followPane}
 
     <button class="big" id="addFanBtn" style="margin-top:14px">➕ Add a fan</button>
   `;
+
+  view.querySelectorAll('[data-fanspane]').forEach((btn) => {
+    btn.onclick = () => { fansPane = btn.dataset.fanspane; viewFans(); };
+  });
 
   document.getElementById('addFanBtn').onclick = () => {
     const sheet = openSheet('New fan', `
@@ -630,49 +677,6 @@ async function viewFans() {
   };
 }
 
-/* ----------------------------- View: Follow-ups ---------------------------- */
-
-async function viewRelances() {
-  setHeader('Follow-ups');
-  setTab('relances');
-  view.innerHTML = '<div class="loading">Loading…</div>';
-
-  const dash = await api('/followups');
-  const cur = config.currency;
-
-  view.innerHTML = `
-    <div class="hero">
-      <div class="greet">Quiet for ${config.silentDays}+ days</div>
-      <div class="headline">${dash.relances.length
-        ? `<em>${dash.relances.length}</em> worth waking up`
-        : 'Nobody to chase 👌'}</div>
-    </div>
-
-    ${dash.relances.length ? `
-      <div class="alert info">
-        Biggest spenders first. Something light brings more back than a pitch.
-      </div>` : ''}
-
-    ${dash.relances.map((f) => `
-      <a class="fan-item" href="#/fan/${f.id}">
-        <div class="avatar" style="${avatarStyle(f.handle)}">${esc(initials(f.display_name || f.handle))}</div>
-        <div class="grow">
-          <div class="row between" style="margin-bottom:3px">
-            <strong class="truncate">${esc(f.display_name || f.handle)}</strong>
-            <span class="tiny">${money(f.total_spent, cur)}</span>
-          </div>
-          <div class="row" style="gap:8px">
-            ${journey(f.stage_label)}
-            <span class="tiny">silent ${f.silent_days}d</span>
-          </div>
-        </div>
-      </a>`).join('') || `
-      <div class="empty">
-        <span class="big-emoji">🎉</span>
-        Everyone has heard from you recently.
-      </div>`}
-  `;
-}
 
 /* --------------------------- View: Conversation ---------------------------- */
 
@@ -705,7 +709,10 @@ async function viewFan(id) {
     <div class="row between" style="margin:2px 0 12px">
       <div class="row" style="gap:9px">
         ${journey(strategy.stage_label)}
-        <span class="tiny">${esc(strategy.stage_label)} · ${money(fan.total_spent, cur)}</span>
+        <span class="tiny">
+          ${esc(strategy.stage_label)} · ${money(fan.total_spent, cur)} spent
+          ${fan.subscription_price ? ` · ${money(fan.subscription_price, cur)}/mo${fan.subscription_tier ? ` (${esc(fan.subscription_tier)})` : ''}` : ''}
+        </span>
       </div>
       <button class="chip" id="openCard">${PERSONA_EMOJI[strategy.personality] || '🎭'} ${esc(strategy.personality_label)}</button>
     </div>
@@ -749,6 +756,14 @@ async function viewFan(id) {
             <span class="tiny">Counted on the dashboard. Saves as soon as you tap it.</span>
           </span>
         </label>
+
+        <div class="row" style="gap:8px">
+          <div class="grow"><label>Tier</label><input id="fTier" value="${esc(fan.subscription_tier || '')}" placeholder="e.g. VIP" /></div>
+          <div class="grow"><label>Price / month</label><input id="fSubPrice" type="number" inputmode="decimal" value="${fan.subscription_price || ''}" placeholder="e.g. 25" /></div>
+        </div>
+        <div class="tiny" style="margin-top:-6px">
+          What he's on and what it costs — separate from what he's actually spent below.
+        </div>
 
         <div><label>His name — fill this in, or the AI will invent one</label><input id="fDisplay" value="${esc(fan.display_name)}" /></div>
         <div><label>What he likes (fed into every generation)</label><textarea id="fKinks" style="min-height:64px">${esc(fan.kinks)}</textarea></div>
@@ -895,10 +910,13 @@ function wireFanCard(id, personalities) {
         display_name: $('#fDisplay').value,
         kinks: $('#fKinks').value,
         notes: $('#fNotes').value,
-        timezone: $('#fTz').value
+        timezone: $('#fTz').value,
+        subscription_tier: $('#fTier').value,
+        subscription_price: Number($('#fSubPrice').value) || 0
       }
     });
     toast('Saved');
+    reopen();
   };
 
   $('#saveManual').onclick = async () => {
@@ -1184,6 +1202,36 @@ function accountDataHtml(competitors, config, cur) {
           <button class="sm ghost" id="importHar" style="width:100%;margin-top:9px">📁 Import a recording</button>
           <div id="harResult"></div>
         </details>
+
+        <details style="margin-top:10px">
+          <summary class="tiny" style="cursor:pointer">Or type the numbers in yourself</summary>
+          <div class="stack" style="margin-top:10px">
+            <div>
+              <label>Period these numbers cover</label>
+              <select id="manPeriod">
+                <option value="last 7 days">Last 7 days</option>
+                <option value="last 30 days" selected>Last 30 days</option>
+                <option value="last 90 days">Last 90 days</option>
+                <option value="all time">All time</option>
+                <option value="__custom">Custom…</option>
+              </select>
+              <input id="manPeriodCustom" hidden placeholder="e.g. March 2026" style="margin-top:8px" />
+            </div>
+            ${[
+              ['Total earnings', 'manEarnings', 'total_earnings', '$'],
+              ['Profile views', 'manViews', 'profile_views', ''],
+              ['Followers', 'manFollowers', 'followers', ''],
+              ['Subscribers', 'manSubs', 'subscribers', ''],
+              ['Engagement rate', 'manEngagement', 'engagement_rate', '%'],
+              ['Avg watch time', 'manWatch', 'avg_watch_time', 'seconds']
+            ].map(([label, id, , unit]) => `
+              <div><label>${esc(label)}${unit ? ` (${esc(unit)})` : ''}</label><input id="${id}" type="number" inputmode="decimal" /></div>`).join('')}
+            <div class="tiny" style="margin-top:2px">Leave anything you don't have blank — only filled-in fields get saved.</div>
+            <div id="manCustomRows"></div>
+            <button class="sm ghost" id="manAddRow" style="width:100%">+ Add another figure</button>
+            <button class="sm primary" id="manSave" style="width:100%">Save this snapshot</button>
+          </div>
+        </details>
       </div>
     </div>
 
@@ -1268,7 +1316,7 @@ function bindAccountData(refresh) {
       </div>
       ${metrics.map(([k, v]) => `
         <div class="row between" style="padding:6px 2px">
-          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString('en-US')}</b>
+          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${fmtMetric(k, v)}</b>
         </div>`).join('')}
       ${rows('TRAFFIC SOURCES', b.traffic_sources)}
       ${rows('TOP CONTENT', b.top_content)}
@@ -1307,7 +1355,7 @@ function bindAccountData(refresh) {
     btn.textContent = `⏳ Reading ${images.length} screenshot${images.length === 1 ? '' : 's'}…`;
 
     try {
-      showStats(box, await api('/platform/scan', { method: 'POST', body: { images } }), viewManager);
+      showStats(box, await api('/platform/scan', { method: 'POST', body: { images } }), refresh);
     } catch (err) {
       showStatsError(box, err);
     } finally {
@@ -1336,12 +1384,64 @@ function bindAccountData(refresh) {
       }
 
       btn.textContent = `⏳ Reading ${picked.blocks.length} response(s)…`;
-      showStats(box, await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } }), viewManager);
+      showStats(box, await api('/platform/har', { method: 'POST', body: { blocks: picked.blocks } }), refresh);
     } catch (err) {
       showStatsError(box, err);
     } finally {
       btn.disabled = false;
       btn.textContent = '📁 Import a recording';
+    }
+  };
+
+  /* -- Manual entry: numbers she already knows, no screenshot needed -- */
+  const periodSelect = document.getElementById('manPeriod');
+  periodSelect.onchange = () => {
+    document.getElementById('manPeriodCustom').hidden = periodSelect.value !== '__custom';
+  };
+
+  const PRESETS = [
+    ['manEarnings', 'total_earnings'], ['manViews', 'profile_views'], ['manFollowers', 'followers'],
+    ['manSubs', 'subscribers'], ['manEngagement', 'engagement_rate'], ['manWatch', 'avg_watch_time']
+  ];
+  let customRowCount = 0;
+  document.getElementById('manAddRow').onclick = () => {
+    customRowCount++;
+    document.getElementById('manCustomRows').insertAdjacentHTML('beforeend', `
+      <div class="row" style="gap:8px">
+        <input class="grow man-custom-label" placeholder="Figure name" />
+        <input type="number" inputmode="decimal" class="man-custom-value" style="max-width:120px" />
+      </div>`);
+  };
+
+  document.getElementById('manSave').onclick = async (e) => {
+    const btn = e.currentTarget;
+    const metrics = {};
+    for (const [id, key] of PRESETS) {
+      const v = document.getElementById(id).value;
+      if (v !== '') metrics[key] = Number(v);
+    }
+    document.querySelectorAll('#manCustomRows .row').forEach((row) => {
+      const label = row.querySelector('.man-custom-label').value.trim();
+      const value = row.querySelector('.man-custom-value').value;
+      if (!label || value === '') return;
+      const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '') || 'figure';
+      metrics[key] = Number(value);
+    });
+
+    if (!Object.keys(metrics).length) return toast('Fill in at least one figure first');
+
+    const period = periodSelect.value === '__custom'
+      ? document.getElementById('manPeriodCustom').value.trim() || 'custom period'
+      : periodSelect.value;
+
+    btn.disabled = true;
+    try {
+      await api('/platform', { method: 'POST', body: { metrics, breakdowns: null, label: period } });
+      toast('📊 Snapshot saved');
+      refresh();
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
     }
   };
 
@@ -1535,15 +1635,6 @@ function platformTrend(snaps) {
   const keys = Object.keys(latest.metrics).slice(0, 10);
   if (!keys.length) return '<div class="tiny">Nothing readable in the last import.</div>';
 
-  // Durations are stored as seconds; "102" on screen reads as nothing useful.
-  const show = (key, v) => {
-    if (/(time|duration)/i.test(key) && v >= 60) {
-      return `${Math.floor(v / 60)}m ${String(Math.round(v % 60)).padStart(2, '0')}s`;
-    }
-    if (/(rate|percent|share)/i.test(key)) return `${v}%`;
-    return v.toLocaleString('en-US');
-  };
-
   const rows = keys.map((k) => {
     const now = latest.metrics[k];
     const was = first.metrics[k];
@@ -1557,7 +1648,7 @@ function platformTrend(snaps) {
       <div class="row between" style="padding:7px 0;border-bottom:1px solid var(--line)">
         <span class="tiny">${esc(k.replace(/_/g, ' '))}</span>
         <span class="row" style="gap:9px">
-          <b style="font-size:15px">${show(k, now)}</b>${delta}
+          <b style="font-size:15px">${fmtMetric(k, now)}</b>${delta}
         </span>
       </div>`;
   }).join('');
@@ -1593,6 +1684,32 @@ function breakdownBlocks(breakdowns) {
     block(breakdowns.top_content, '🔥 Best performing content', false),
     block(breakdowns.hashtags, '#️⃣ Hashtags that work', false)
   ].join('');
+}
+
+/* Every saved snapshot, newest first, collapsed to a one-line summary that
+   expands to the full figures — so "remembering" past stats means something she
+   can actually reopen, not just a trend line against the very first import. */
+function platformHistoryHtml(snaps) {
+  return [...snaps].reverse().map((s) => {
+    const count = Object.keys(s.metrics).length;
+    const date = String(s.captured_at).slice(0, 10);
+    return `
+      <div class="plat-entry" style="border-bottom:1px solid var(--line);padding:9px 0">
+        <div class="row between" data-plat-open="${s.id}" style="cursor:pointer">
+          <span class="tiny"><b>${esc(s.label || 'snapshot')}</b> · ${date} · ${count} figure${count === 1 ? '' : 's'}</span>
+          <span class="row" style="gap:10px">
+            <button class="sm danger" data-plat-del="${s.id}">✕</button>
+          </span>
+        </div>
+        <div id="platBody${s.id}" hidden style="margin-top:8px">
+          ${Object.entries(s.metrics).map(([k, v]) => `
+            <div class="row between" style="padding:4px 2px">
+              <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${fmtMetric(k, v)}</b>
+            </div>`).join('')}
+          ${breakdownBlocks(s.breakdowns)}
+        </div>
+      </div>`;
+  }).join('');
 }
 
 /** Which of the three Manager panes is open. Survives a re-render. */
@@ -1775,9 +1892,14 @@ async function viewManager() {
       <h2>From Fansly</h2>
       ${platform.length ? platformTrend(platform) : `
         <div class="tiny">
-          Nothing imported yet. Send your Fansly stats screenshots from
-          <b>Settings → My account</b> and they show up here.
+          Nothing imported yet. Send your Fansly stats screenshots — or type
+          them in — from <b>Settings → My account</b> and they show up here.
         </div>`}
+      ${platform.length ? `
+        <button class="sm ghost" id="platHistoryToggle" style="width:100%;margin-top:12px">
+          🕘 See all ${platform.length} import${platform.length === 1 ? '' : 's'}
+        </button>
+        <div id="platHistory" hidden style="margin-top:10px"></div>` : ''}
     </div>`;
 
   const planPane = `
@@ -1841,6 +1963,32 @@ async function viewManager() {
   if (goalClearBtn) goalClearBtn.onclick = async () => {
     await api('/goal', { method: 'POST', body: { target: 0 } });
     viewManager();
+  };
+
+  /* -- Past Fansly imports: collapsed by default, one snapshot expands at a time -- */
+  const histToggle = document.getElementById('platHistoryToggle');
+  if (histToggle) histToggle.onclick = () => {
+    const box = document.getElementById('platHistory');
+    if (box.hidden) box.innerHTML = platformHistoryHtml(platform);
+    box.hidden = !box.hidden;
+    histToggle.textContent = box.hidden
+      ? `🕘 See all ${platform.length} import${platform.length === 1 ? '' : 's'}`
+      : 'Hide history';
+
+    box.querySelectorAll('[data-plat-open]').forEach((row) => {
+      row.onclick = () => {
+        const body = document.getElementById(`platBody${row.dataset.platOpen}`);
+        body.hidden = !body.hidden;
+      };
+    });
+    box.querySelectorAll('[data-plat-del]').forEach((btn) => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        await api(`/platform/${btn.dataset.platDel}`, { method: 'DELETE' });
+        toast('Snapshot removed');
+        viewManager();
+      };
+    });
   };
 
   /* -- The written plan -- */
@@ -2198,7 +2346,6 @@ async function router() {
   try {
     const fanMatch = hash.match(/^#\/fan\/(\d+)$/);
     if (fanMatch) return await viewFan(Number(fanMatch[1]));
-    if (hash.startsWith('#/relances')) return await viewRelances();
     if (hash.startsWith('#/manager')) return await viewManager();
     if (hash.startsWith('#/media')) return await viewMedia();
     if (hash.startsWith('#/reglages')) return await viewReglages();

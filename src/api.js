@@ -602,7 +602,9 @@ export const routes = {
     return ok({ revenueGoal: Math.round(target) });
   },
 
-  'GET /api/platform': ({ userId }) => ok(db.listPlatformStats(userId, 12)),
+  // 60 rather than 12: she can now browse her whole import history, not just
+  // enough for a trend line.
+  'GET /api/platform': ({ userId }) => ok(db.listPlatformStats(userId, 60)),
 
   'POST /api/platform': ({ body, userId }) => {
     const metrics = body?.metrics;

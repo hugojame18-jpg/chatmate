@@ -163,7 +163,12 @@ for (const sql of [
   'ALTER TABLE fans ADD COLUMN is_subscriber INTEGER DEFAULT 0',
   // When he became a subscriber. is_subscriber alone cannot answer "how many
   // subscribed yesterday" — this is what the daily briefing reads.
-  'ALTER TABLE fans ADD COLUMN subscribed_at TEXT'
+  'ALTER TABLE fans ADD COLUMN subscribed_at TEXT',
+  // What tier he is on and what it costs, separate from is_subscriber (a yes/no)
+  // and from total_spent (the real ledger of logged purchases) — this is just
+  // what she has told the app he currently pays.
+  "ALTER TABLE fans ADD COLUMN subscription_tier TEXT DEFAULT ''",
+  'ALTER TABLE fans ADD COLUMN subscription_price REAL DEFAULT 0'
 ]) {
   try { db.exec(sql); } catch { /* column already there */ }
 }
@@ -349,7 +354,7 @@ export function createFan(userId, {
 
 const FAN_FIELDS = [
   'handle', 'display_name', 'notes', 'kinks', 'timezone', 'personality', 'blocked',
-  'block_reason', 'is_subscriber'
+  'block_reason', 'is_subscriber', 'subscription_tier', 'subscription_price'
 ];
 
 // Columns that hold a flag. node:sqlite refuses to bind a JS boolean, so a
