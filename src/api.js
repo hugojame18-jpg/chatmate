@@ -14,6 +14,9 @@ import {
 } from './llm.js';
 import { collectFromHar, prepare } from './har.js';
 import { buildManagerPayload, buildStrategyPayload, buildSnapshot } from './manager.js';
+import {
+  buildBriefing, buildCeoFocus, buildHealthScore, buildRootCause, buildTrends
+} from './dashboard.js';
 import { fetchAccount, FanslyError } from './fansly.js';
 import { screenIncoming, screenOutgoing } from './safety.js';
 
@@ -39,6 +42,31 @@ function decorateFan(fan, config) {
     stage_color: STAGES[stage].color,
     silent_days: daysSince(lastFanMsg?.created_at || fan.last_activity),
     waiting_reply: waiting
+  };
+}
+
+/**
+ * A monthly target has to speak in whole-month terms — percent complete, pace,
+ * dollars needed per remaining day — but "the month" changes shape depending on
+ * where `now` falls, so all of that lives in one place next to the goal itself
+ * rather than half in the route and half wherever it gets rendered.
+ */
+function buildGoal(userId, now, thisMonthRevenue) {
+  const target = Number(db.getConfig(userId).revenueGoal) || 0;
+  if (!target) return { target: 0 };
+
+  const daysInMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getDate();
+  const daysElapsed = now.getDate();
+  const daysLeft = daysInMonth - daysElapsed;
+  const expectedByNow = target * (daysElapsed / daysInMonth);
+
+  return {
+    target,
+    pct: Math.round((thisMonthRevenue / target) * 100),
+    onPace: thisMonthRevenue >= expectedByNow,
+    neededPerDay: daysLeft > 0 ? Math.max(0, (target - thisMonthRevenue) / daysLeft) : 0,
+    projected: daysElapsed > 0 ? Math.round((thisMonthRevenue / daysElapsed) * daysInMonth) : 0,
+    daysLeft
   };
 }
 
@@ -497,8 +525,11 @@ export const routes = {
 
   // Everything the dashboard draws, computed here rather than in the browser so
   // the numbers cannot drift between what is shown and what the manager reasons on.
+  // One query set feeds the headline cards AND the health score / root cause /
+  // CEO focus below, so nothing on the page can ever disagree with anything else.
   'GET /api/dashboard': ({ userId }) => {
     const snapshot = buildSnapshot(userId);
+    const cur = snapshot.currency;
     const now = new Date();
 
     const monthStart = new Date(now.getFullYear(), now.getMonth(), 1);
@@ -525,9 +556,10 @@ export const routes = {
       new Date(Date.now() - 60 * 86400000).toISOString(),
       new Date(Date.now() - 30 * 86400000).toISOString()
     );
+    const delta30 = prev30.total > 0 ? Math.round(((last30 - prev30.total) / prev30.total) * 100) : null;
 
-    return ok({
-      currency: snapshot.currency,
+    const dash = {
+      currency: cur,
       totals: db.accountTotals(userId),
       byStage: snapshot.byStage,
       topSpenders: snapshot.topSpenders.slice(0, 5),
@@ -538,9 +570,7 @@ export const routes = {
       prev30: prev30.total,
       // Null rather than 0 when there is nothing to compare against: "+0%" against
       // an empty period is a made-up number, and she would act on it.
-      delta30: prev30.total > 0
-        ? Math.round(((last30 - prev30.total) / prev30.total) * 100)
-        : null,
+      delta30,
       thisMonth: thisMonth.total,
       lastMonth: lastMonth.total,
       lastMonthFull: lastMonthFull.total,
@@ -548,8 +578,28 @@ export const routes = {
       monthDelta: lastMonth.total > 0
         ? Math.round(((thisMonth.total - lastMonth.total) / lastMonth.total) * 100)
         : null,
-      offers: db.offerStats(userId)
+      offers: db.offerStats(userId),
+      goal: buildGoal(userId, now, thisMonth.total)
+    };
+
+    const health = buildHealthScore(userId, dash);
+    const rootCause = buildRootCause(userId, dash);
+
+    return ok({
+      ...dash,
+      briefing: buildBriefing(userId),
+      healthScore: health,
+      trends: buildTrends(userId),
+      rootCause,
+      ceoFocus: buildCeoFocus(userId, { dash, health, rootCause, cur })
     });
+  },
+
+  'POST /api/goal': ({ body, userId }) => {
+    const target = Number(body?.target);
+    if (!Number.isFinite(target) || target < 0) return bad('Enter a whole number, 0 or more.');
+    db.saveConfig(userId, { revenueGoal: Math.round(target) });
+    return ok({ revenueGoal: Math.round(target) });
   },
 
   'GET /api/platform': ({ userId }) => ok(db.listPlatformStats(userId, 12)),

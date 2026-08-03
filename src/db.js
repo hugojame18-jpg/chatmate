@@ -160,7 +160,10 @@ for (const sql of [
   'ALTER TABLE platform_stats ADD COLUMN breakdowns TEXT',
   // Whether he pays the monthly subscription. Separate from total_spent: a fan can
   // subscribe and never buy a PPV, or buy plenty without ever subscribing.
-  'ALTER TABLE fans ADD COLUMN is_subscriber INTEGER DEFAULT 0'
+  'ALTER TABLE fans ADD COLUMN is_subscriber INTEGER DEFAULT 0',
+  // When he became a subscriber. is_subscriber alone cannot answer "how many
+  // subscribed yesterday" — this is what the daily briefing reads.
+  'ALTER TABLE fans ADD COLUMN subscribed_at TEXT'
 ]) {
   try { db.exec(sql); } catch { /* column already there */ }
 }
@@ -269,7 +272,10 @@ export const DEFAULT_CONFIG = {
   managerWebSearch: false,
   // Her own Fansly handle, so the stats can be refreshed in one tap.
   fanslyHandle: '',
-  llmApiKey: ''
+  llmApiKey: '',
+  // Monthly revenue target. 0 means unset — the dashboard prompts for one instead
+  // of showing a progress bar against a goal that does not exist.
+  revenueGoal: 0
 };
 
 export function getConfig(userId) {
@@ -317,17 +323,27 @@ export function getFan(userId, id) {
   `).get(id, userId);
 }
 
+// A date string is only trusted if it actually parses and is not in the future —
+// same rule as backdating a purchase. Anything else falls back to right now rather
+// than reject a fan edit over a cosmetic field.
+function pastDateOrNow(value) {
+  if (!value) return nowISO();
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime()) || d.getTime() > Date.now() + 86400000) return nowISO();
+  return d.toISOString();
+}
+
 export function createFan(userId, {
   handle, display_name = '', notes = '', kinks = '', timezone = '', personality = '',
-  is_subscriber = 0
+  is_subscriber = 0, subscribed_at = null
 }) {
   const ts = nowISO();
   const info = db.prepare(`
     INSERT INTO fans(user_id, handle, display_name, notes, kinks, timezone, personality,
-                     is_subscriber, created_at, last_activity)
-    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     is_subscriber, subscribed_at, created_at, last_activity)
+    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `).run(userId, handle, display_name, notes, kinks, timezone, personality,
-    is_subscriber ? 1 : 0, ts, ts);
+    is_subscriber ? 1 : 0, is_subscriber ? pastDateOrNow(subscribed_at) : null, ts, ts);
   return getFan(userId, Number(info.lastInsertRowid));
 }
 
@@ -347,6 +363,15 @@ export function updateFan(userId, id, patch) {
     const sql = `UPDATE fans SET ${keys.map((k) => `${k} = ?`).join(', ')} WHERE id = ? AND user_id = ?`;
     db.prepare(sql).run(...values, id, userId);
   }
+
+  // Ticking the box is the only signal we get that "today" he became a subscriber,
+  // so that is when the date is stamped — a seed script or a late correction can
+  // override it with a real past date via `subscribed_at`.
+  if (keys.includes('is_subscriber') && patch.is_subscriber) {
+    db.prepare('UPDATE fans SET subscribed_at = ? WHERE id = ? AND user_id = ?')
+      .run(pastDateOrNow(patch.subscribed_at), id, userId);
+  }
+
   return getFan(userId, id);
 }
 
@@ -617,6 +642,118 @@ export function newFansByDay(userId, days = 30) {
     out.push({ day, count: byDay.get(day) || 0 });
   }
   return out;
+}
+
+/** [fromISO, toISO) for the single day `offset` days ago. 0 = today, 1 = yesterday. */
+export function dayBounds(offset) {
+  const from = new Date();
+  from.setHours(0, 0, 0, 0);
+  from.setDate(from.getDate() - offset);
+  const to = new Date(from);
+  to.setDate(to.getDate() + 1);
+  return [from.toISOString(), to.toISOString()];
+}
+
+export function newFansBetween(userId, fromISO, toISO) {
+  const row = db.prepare(
+    'SELECT COUNT(*) AS n FROM fans WHERE user_id = ? AND created_at >= ? AND created_at < ?'
+  ).get(userId, fromISO, toISO);
+  return row?.n || 0;
+}
+
+export function subscribersBetween(userId, fromISO, toISO) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n FROM fans
+    WHERE user_id = ? AND is_subscriber = 1 AND subscribed_at >= ? AND subscribed_at < ?
+  `).get(userId, fromISO, toISO);
+  return row?.n || 0;
+}
+
+/**
+ * Purchase behaviour over a window: how many sales, how many distinct people
+ * bought, and what they paid on average. The health score and the root-cause
+ * breakdown both decompose revenue into these same three numbers, so one query
+ * backs both rather than two slightly different ones drifting apart.
+ */
+export function periodPurchaseStats(userId, fromISO, toISO) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS count, COUNT(DISTINCT p.fan_id) AS buyers, SUM(p.amount) AS revenue
+    FROM purchases p JOIN fans f ON f.id = p.fan_id
+    WHERE f.user_id = ? AND p.created_at >= ? AND p.created_at < ?
+  `).get(userId, fromISO, toISO);
+
+  const count = row?.count || 0;
+  const revenue = Number(row?.revenue || 0);
+  return { count, buyers: row?.buyers || 0, revenue, avgOrder: count ? revenue / count : 0 };
+}
+
+/**
+ * The most recently pitched PPV, and how it has converted across everyone it was
+ * ever sent to — not just yesterday, since a single day rarely has enough sends
+ * to mean anything. Null when nothing has ever been pitched.
+ */
+export function lastPpvConversion(userId) {
+  const last = db.prepare(`
+    SELECT media_title, created_at FROM offers
+    WHERE user_id = ? AND media_title <> '' ORDER BY id DESC LIMIT 1
+  `).get(userId);
+  if (!last) return null;
+
+  const agg = db.prepare(`
+    SELECT COUNT(*) AS sent, SUM(CASE WHEN outcome = 'bought' THEN 1 ELSE 0 END) AS bought
+    FROM offers WHERE user_id = ? AND media_title = ? AND outcome IN ('bought', 'declined')
+  `).get(userId, last.media_title);
+
+  const sent = agg?.sent || 0;
+  return {
+    title: last.media_title,
+    lastSentAt: last.created_at,
+    sent,
+    bought: agg?.bought || 0,
+    rate: sent ? Math.round(((agg.bought || 0) / sent) * 100) : null
+  };
+}
+
+/** How many fans have bought more than once — the raw material for a retention rate. */
+export function repeatBuyerCount(userId) {
+  const row = db.prepare(`
+    SELECT COUNT(*) AS n FROM (
+      SELECT p.fan_id FROM purchases p JOIN fans f ON f.id = p.fan_id
+      WHERE f.user_id = ? GROUP BY p.fan_id HAVING COUNT(*) >= 2
+    )
+  `).get(userId);
+  return row?.n || 0;
+}
+
+export function pendingOffersCount(userId) {
+  const row = db.prepare(
+    "SELECT COUNT(*) AS n FROM offers WHERE user_id = ? AND outcome = 'pending'"
+  ).get(userId);
+  return row?.n || 0;
+}
+
+/**
+ * Revenue grouped by weekday (0 = Sunday .. 6 = Saturday), with the number of
+ * distinct calendar dates behind each bucket so a pattern from three lucky
+ * Fridays cannot be reported as "Fridays are your best day".
+ */
+export function revenueByWeekday(userId) {
+  return db.prepare(`
+    SELECT CAST(strftime('%w', p.created_at) AS INTEGER) AS dow,
+           SUM(p.amount) AS total, COUNT(*) AS n, COUNT(DISTINCT substr(p.created_at, 1, 10)) AS days
+    FROM purchases p JOIN fans f ON f.id = p.fan_id
+    WHERE f.user_id = ?
+    GROUP BY dow
+  `).all(userId);
+}
+
+export function newFansByWeekday(userId) {
+  return db.prepare(`
+    SELECT CAST(strftime('%w', created_at) AS INTEGER) AS dow,
+           COUNT(*) AS n, COUNT(DISTINCT substr(created_at, 1, 10)) AS days
+    FROM fans WHERE user_id = ?
+    GROUP BY dow
+  `).all(userId);
 }
 
 /* --------------------------- Platform snapshots ---------------------------- */

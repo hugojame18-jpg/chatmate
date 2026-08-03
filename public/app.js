@@ -345,6 +345,175 @@ function rankedBars(rows, { format = (v) => v, ramp = null } = {}) {
     </div>`).join('')}</div>`;
 }
 
+/* ------------------------------ Dashboard insights -------------------------- */
+
+/** score/20 -> a status band. Same three bands the whole app already uses for
+ *  status colour, applied to a score instead of a live/paused/error state. */
+function band(score, max = 20) {
+  const pct = score / max;
+  return pct >= 0.7 ? 'ok' : pct >= 0.4 ? 'warn' : 'danger';
+}
+
+function healthScoreHtml(health) {
+  const b = band(health.total, 100);
+  const bandLabel = { ok: 'Healthy', warn: 'Needs attention', danger: 'At risk' }[b];
+
+  return `
+    <div class="card">
+      <h2>Business health</h2>
+      <div class="health-total">
+        <span class="figure">${health.total}<span class="tiny" style="font-weight:600">/100</span></span>
+        <span class="health-band ${b}">${bandLabel}</span>
+      </div>
+      ${health.dimensions.map((d) => {
+        const db = band(d.score);
+        return `
+          <div class="health-dim">
+            <span class="dot ${db}"></span>
+            <span class="label">${esc(d.label)}</span>
+            <span class="bar-track"><span class="bar-fill" style="width:${(d.score / 20) * 100}%;background:var(--${db === 'ok' ? 'ok' : db === 'warn' ? 'warn' : 'danger'})"></span></span>
+            <span class="score">${d.score}/20</span>
+            <span class="health-note">${esc(d.note)}</span>
+          </div>`;
+      }).join('')}
+    </div>`;
+}
+
+function ceoFocusHtml(tasks) {
+  if (!tasks.length) return '';
+  return `
+    <div class="card">
+      <h2>🎯 CEO focus — today</h2>
+      <div class="task-list">
+        ${tasks.map((t, i) => `
+          <div class="task">
+            <span class="num">${i + 1}</span>
+            <div>
+              <div class="title">${esc(t.title)}</div>
+              <div class="why">${esc(t.why)}</div>
+            </div>
+          </div>`).join('')}
+      </div>
+    </div>`;
+}
+
+function rootCauseHtml(rc, cur) {
+  if (!rc.hasDrop) return '';
+
+  const driverText = (d) => {
+    if (d.key === 'buyers') return `<b>${d.before} → ${d.after} buyers</b> — fewer people bought at all`;
+    if (d.key === 'avgOrder') return `Average order <b>${money(d.before, cur)} → ${money(d.after, cur)}</b> — buyers spent less per purchase`;
+    return `Buyers purchased <b>less often</b> — ${d.before.toFixed(1)} → ${d.after.toFixed(1)} orders per buyer`;
+  };
+
+  return `
+    <div class="card">
+      <h2>Why revenue dropped</h2>
+      <div class="alert block">
+        <strong>${money(rc.last30, cur)} vs ${money(rc.prev30, cur)} the 30 days before — down ${Math.abs(rc.deltaPct)}%</strong>
+        ${rc.drivers.length
+          ? `Main driver: ${driverText(rc.drivers[0])}.`
+          : 'No single factor stands out — a broad, even softness across the period.'}
+      </div>
+      ${rc.drivers.slice(1).map((d) => `<div class="tiny" style="margin-bottom:6px">Also: ${driverText(d)}.</div>`).join('')}
+      ${rc.newFansTrend !== null && rc.newFansTrend < -0.1
+        ? `<div class="tiny">New fans are also down ${Math.round(Math.abs(rc.newFansTrend) * 100)}% — the pipeline behind future sales is thinning too.</div>` : ''}
+      ${rc.goingQuiet > 0 ? `<div class="tiny">${rc.goingQuiet} fan${rc.goingQuiet > 1 ? 's have' : ' has'} gone quiet.</div>` : ''}
+    </div>`;
+}
+
+function briefingHtml(b, cur) {
+  const ppv = b.lastPpv
+    ? b.lastPpv.rate === null
+      ? `${esc(b.lastPpv.title)} <span class="tiny">— still pending</span>`
+      : `${b.lastPpv.rate}% <span class="tiny">${esc(b.lastPpv.title)}, ${b.lastPpv.bought}/${b.lastPpv.sent}</span>`
+    : `<span class="tiny">Nothing pitched yet</span>`;
+
+  const source = b.topSource
+    ? `${esc(b.topSource.label)} <span class="tiny">${b.topSource.value}%, as of ${new Date(b.topSource.asOf).toLocaleDateString('en-US', { day: 'numeric', month: 'short' })}</span>`
+    : `<span class="tiny">Import Fansly stats to see this</span>`;
+
+  return `
+    <div class="card">
+      <h2>Yesterday</h2>
+      <div class="brief-row">
+        <span class="k">Revenue</span>
+        <span class="v">${money(b.revenue, cur)}${b.sales ? ` <span class="tiny">${b.sales} sale${b.sales > 1 ? 's' : ''}</span>` : ''}</span>
+      </div>
+      <div class="brief-row">
+        <span class="k">New subscribers</span>
+        <span class="v">${b.newSubscribers}</span>
+      </div>
+      <div class="brief-row">
+        <span class="k">Last PPV conversion</span>
+        <span class="v">${ppv}</span>
+      </div>
+      <div class="brief-row">
+        <span class="k">Top traffic source</span>
+        <span class="v">${source}</span>
+      </div>
+    </div>`;
+}
+
+function trendsHtml(trends) {
+  if (!trends.length) return '';
+  return `
+    <div class="card">
+      <h2>💡 Patterns</h2>
+      ${trends.map((t) => `
+        <div class="trend">
+          <span class="spark">✨</span>
+          <div>
+            <div class="label">${esc(t.label)}</div>
+            <div class="detail">${esc(t.detail)}</div>
+          </div>
+        </div>`).join('')}
+    </div>`;
+}
+
+function goalHtml(goal, cur, thisMonth) {
+  if (!goal.target) {
+    return `
+      <div class="card">
+        <h2>Revenue goal</h2>
+        <div class="tiny" style="margin-bottom:11px">Set a monthly target and track your pace against it.</div>
+        <div class="row" style="gap:8px">
+          <input id="goalInput" type="number" inputmode="decimal" placeholder="e.g. 3000" class="grow" />
+          <button class="primary" id="goalSave">Set goal</button>
+        </div>
+      </div>`;
+  }
+
+  const pct = Math.min(100, Math.max(0, goal.pct));
+  const paceNote = goal.onPace
+    ? `<span class="delta up">✓ On pace</span>`
+    : `<span class="delta down">Behind pace — need ${money(goal.neededPerDay, cur)}/day for the rest of the month</span>`;
+
+  return `
+    <div class="card">
+      <div class="row between">
+        <h2 style="margin:0">Revenue goal</h2>
+        <button class="chip" id="goalEdit">Edit</button>
+      </div>
+      <div class="tiny" style="margin-top:9px">
+        ${money(thisMonth, cur)} so far this month, of ${money(goal.target, cur)} goal
+        · on pace to reach ${money(goal.projected, cur)}
+      </div>
+      <div class="goal-track"><span class="goal-fill ${goal.pct >= 100 ? 'over' : ''}" style="width:${pct}%"></span></div>
+      <div class="row between">
+        <span class="tiny">${goal.pct}%</span>
+        ${paceNote}
+      </div>
+      <div id="goalEditBox" hidden style="margin-top:12px">
+        <div class="row" style="gap:8px">
+          <input id="goalInput" type="number" inputmode="decimal" value="${goal.target}" class="grow" />
+          <button class="primary" id="goalSave">Save</button>
+        </div>
+        <button class="sm ghost" id="goalClear" style="width:100%;margin-top:8px">Remove goal</button>
+      </div>
+    </div>`;
+}
+
 /* ---------------------------------- State --------------------------------- */
 
 let config = {};
@@ -1029,8 +1198,8 @@ function accountDataHtml(competitors, config, cur) {
           <div class="grow">
             <strong>${esc(c.handle || c.display_name)}</strong>
             <div class="tiny">
-              ${[c.followers != null ? `${c.followers.toLocaleString()} followers` : null,
-                 c.subscribers != null ? `${c.subscribers.toLocaleString()} subs` : null,
+              ${[c.followers != null ? `${c.followers.toLocaleString('en-US')} followers` : null,
+                 c.subscribers != null ? `${c.subscribers.toLocaleString('en-US')} subs` : null,
                  c.price != null ? `${money(c.price, cur)}/mo` : null,
                  c.themes || null].filter(Boolean).join(" · ") || "no figures read"}
             </div>
@@ -1055,7 +1224,7 @@ function bindAccountData(refresh) {
     btn.textContent = '⏳';
     try {
       const res = await api('/fansly/lookup', { method: 'POST', body: { input, save, notes } });
-      toast(`✅ ${res.display_name || res.handle} — ${res.metrics.followers.toLocaleString()} followers`);
+      toast(`✅ ${res.display_name || res.handle} — ${res.metrics.followers.toLocaleString('en-US')} followers`);
       refresh();
     } catch (err) {
       toast(err.message);
@@ -1089,7 +1258,7 @@ function bindAccountData(refresh) {
       ${list.map((r) => `
         <div class="row between" style="padding:5px 2px">
           <span class="tiny">${esc(r.label)}</span>
-          <b>${r.value.toLocaleString()}${r.unit === '%' ? '%' : ''}</b>
+          <b>${r.value.toLocaleString('en-US')}${r.unit === '%' ? '%' : ''}</b>
         </div>`).join('')}` : '');
 
     box.innerHTML = `
@@ -1099,7 +1268,7 @@ function bindAccountData(refresh) {
       </div>
       ${metrics.map(([k, v]) => `
         <div class="row between" style="padding:6px 2px">
-          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString()}</b>
+          <span class="tiny">${esc(k.replace(/_/g, ' '))}</span><b>${v.toLocaleString('en-US')}</b>
         </div>`).join('')}
       ${rows('TRAFFIC SOURCES', b.traffic_sources)}
       ${rows('TOP CONTENT', b.top_content)}
@@ -1372,7 +1541,7 @@ function platformTrend(snaps) {
       return `${Math.floor(v / 60)}m ${String(Math.round(v % 60)).padStart(2, '0')}s`;
     }
     if (/(rate|percent|share)/i.test(key)) return `${v}%`;
-    return v.toLocaleString();
+    return v.toLocaleString('en-US');
   };
 
   const rows = keys.map((k) => {
@@ -1414,7 +1583,7 @@ function breakdownBlocks(breakdowns) {
           <div class="meter">
             <span class="k" style="width:104px">${esc(r.label)}</span>
             <span class="track"><span class="fill" style="width:${Math.round((r.value / max) * 100)}%"></span></span>
-            <span class="v" style="width:66px">${asBar ? `${r.value}%` : `${r.value.toLocaleString()}${r.unit ? ` ${esc(r.unit)}` : ''}`}</span>
+            <span class="v" style="width:66px">${asBar ? `${r.value}%` : `${r.value.toLocaleString('en-US')}${r.unit ? ` ${esc(r.unit)}` : ''}`}</span>
           </div>`).join('')}
       </div>`;
   };
@@ -1523,7 +1692,7 @@ async function viewManager() {
         </div>`}
     </div>`;
 
-  const day = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString(undefined, { day: 'numeric', month: 'short' });
+  const day = (iso) => new Date(iso + 'T00:00:00').toLocaleDateString('en-US', { day: 'numeric', month: 'short' });
 
   const delta = dash.delta30 === null
     ? '<span class="delta flat">nothing yet to compare against</span>'
@@ -1545,6 +1714,11 @@ async function viewManager() {
         ${money(t.revenue, cur)} all time
       </div>
     </div>
+
+    ${healthScoreHtml(dash.healthScore)}
+    ${ceoFocusHtml(dash.ceoFocus)}
+    ${rootCauseHtml(dash.rootCause, cur)}
+    ${briefingHtml(dash.briefing, cur)}
 
     <div class="stat-grid" style="margin-bottom:14px">
       <div class="stat hi"><b>${t.subscribers}</b><span class="tiny">subscribers</span></div>
@@ -1574,6 +1748,9 @@ async function viewManager() {
         { format: (v) => `${v} fan${v === 1 ? '' : 's'}`, label: 'New fans per day over the last 30 days' }
       )}
     </div>
+
+    ${trendsHtml(dash.trends)}
+    ${goalHtml(dash.goal, cur, dash.thisMonth)}
 
     <div class="card">
       <div class="chart-head">
@@ -1639,6 +1816,32 @@ async function viewManager() {
 
   /* Only one pane is in the DOM at a time, so each block below checks that the
      element it drives is actually on screen. */
+
+  /* -- Revenue goal: set, edit or clear -- */
+  const goalEditBtn = document.getElementById('goalEdit');
+  if (goalEditBtn) goalEditBtn.onclick = () => {
+    document.getElementById('goalEditBox').hidden = false;
+    goalEditBtn.hidden = true;
+  };
+
+  const goalSaveBtn = document.getElementById('goalSave');
+  if (goalSaveBtn) goalSaveBtn.onclick = async () => {
+    const value = document.getElementById('goalInput').value;
+    goalSaveBtn.disabled = true;
+    try {
+      await api('/goal', { method: 'POST', body: { target: Number(value) || 0 } });
+      viewManager();
+    } catch (err) {
+      toast(err.message);
+      goalSaveBtn.disabled = false;
+    }
+  };
+
+  const goalClearBtn = document.getElementById('goalClear');
+  if (goalClearBtn) goalClearBtn.onclick = async () => {
+    await api('/goal', { method: 'POST', body: { target: 0 } });
+    viewManager();
+  };
 
   /* -- The written plan -- */
   const showStrategy = (s) => {

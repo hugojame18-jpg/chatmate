@@ -176,6 +176,73 @@ button:active:not(:disabled) { transform: scale(.97); }
 .delta.down { color: var(--danger); }
 .delta.flat { color: var(--muted); }
 
+/* ------------------------------- Health score ------------------------------ */
+/* Score bands are status, not identity — good/warning/at-risk — so they reuse
+   the app's reserved status colors rather than a categorical palette, and every
+   band ships with its label printed alongside, never color alone. */
+
+.health-total { display: flex; align-items: baseline; gap: 10px; margin-bottom: 12px; }
+.health-total .figure { font-size: 34px; }
+.health-band {
+  font-size: 12.5px; font-weight: 800; padding: 4px 10px; border-radius: 999px;
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.health-band.ok      { background: #45d69f22; color: var(--ok); }
+.health-band.warn    { background: #ffc24722; color: var(--warn); }
+.health-band.danger  { background: #ff6b6b22; color: var(--danger); }
+
+.health-dim { display: grid; grid-template-columns: 20px 90px 1fr 46px; align-items: center; gap: 10px; margin-bottom: 10px; }
+.health-dim:last-child { margin-bottom: 0; }
+.health-dim .dot { width: 9px; height: 9px; border-radius: 50%; justify-self: center; }
+.health-dim .dot.ok { background: var(--ok); }
+.health-dim .dot.warn { background: var(--warn); }
+.health-dim .dot.danger { background: var(--danger); }
+.health-dim .label { font-size: 13px; font-weight: 650; }
+.health-dim .bar-track { height: 7px; }
+.health-dim .score { font-size: 12.5px; font-weight: 700; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+.health-note { font-size: 11.5px; color: var(--faint); grid-column: 2 / -1; margin-top: -4px; }
+
+/* ---------------------------------- Tasks ----------------------------------- */
+
+.task-list { display: flex; flex-direction: column; gap: 13px; }
+.task {
+  display: flex; gap: 11px; padding: 12px 13px; border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+.task .num {
+  flex: none; width: 22px; height: 22px; border-radius: 50%; background: var(--grad);
+  color: #fff; font-size: 12px; font-weight: 800; display: flex; align-items: center; justify-content: center;
+}
+.task .title { font-size: 14px; font-weight: 650; margin-bottom: 3px; }
+.task .why { font-size: 12.5px; color: var(--muted); line-height: 1.4; }
+
+/* -------------------------------- Briefing ---------------------------------- */
+
+.brief-row {
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 10px;
+  padding: 10px 0; border-bottom: 1px solid var(--line);
+}
+.brief-row:last-child { border-bottom: 0; padding-bottom: 0; }
+.brief-row .k { font-size: 13px; color: var(--muted); }
+.brief-row .v { font-size: 14px; font-weight: 700; text-align: right; }
+.brief-row .v .tiny { font-weight: 400; margin-top: 2px; }
+
+/* ---------------------------------- Trends ----------------------------------- */
+
+.trend {
+  display: flex; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line);
+}
+.trend:last-child { border-bottom: 0; padding-bottom: 0; }
+.trend .spark { font-size: 17px; line-height: 1; }
+.trend .label { font-size: 13.5px; font-weight: 650; }
+.trend .detail { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+
+/* ----------------------------------- Goal ------------------------------------ */
+
+.goal-track { height: 14px; border-radius: 999px; background: var(--surface-2); overflow: hidden; margin: 10px 0 8px; }
+.goal-fill { display: block; height: 100%; border-radius: 999px; background: var(--grad); transition: width .3s; }
+.goal-fill.over { background: var(--ok); }
+
 /* Segmented control. Three panes on one tab beats one long scroll: the manager
    chat used to sit under every card on the page, so talking to it meant a trip
    to the bottom of the screen every time. */
